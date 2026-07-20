@@ -1,0 +1,14 @@
+bin/
+obj/
+.vs/
+
+*.user
+*.suo
+*.log
+*.tmp
+
+SmartShellCleaner.config.json
+SmartShellCleaner.status.json
+cleaning-audit.json
+open-shop-tabs.json
+

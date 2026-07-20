@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "SmartShell Bridge",
+  "version": "1.0.2",
+  "description": "Передаёт авторизацию открытого SmartShell локальному приложению клуба.",
+  "permissions": ["alarms", "cookies", "scripting", "tabs", "webRequest"],
+  "host_permissions": [
+    "https://*.smartshell.gg/*",
+    "http://127.0.0.1:17843/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://admin.smartshell.gg/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "SmartShell Bridge"
+  }
+}
