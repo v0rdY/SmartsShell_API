@@ -384,6 +384,7 @@ internal sealed class CartItem
     public string Title { get; set; } = "";
     public string ClientUuid { get; set; } = "";
     public string ClientDisplay { get; set; } = "";
+    public string PaymentMethod { get; set; } = "";
     public decimal BonusAmount { get; set; }
     public string Comment { get; set; } = "";
     public int Amount { get; set; } = 1;
@@ -403,6 +404,7 @@ internal sealed class CartItem
             Title = Title,
             ClientUuid = ClientUuid,
             ClientDisplay = ClientDisplay,
+            PaymentMethod = PaymentMethod,
             BonusAmount = BonusAmount,
             Comment = Comment,
             Amount = Amount,

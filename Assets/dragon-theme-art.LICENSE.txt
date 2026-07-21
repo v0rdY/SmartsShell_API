@@ -1,0 +1,16 @@
+Rodion dragon theme artwork
+
+Dragon Head
+Source: https://openclipart.org/detail/302205/dragon-head
+Asset: https://openclipart.org/image/800px/302205
+Uploader: Falco276
+
+Flames
+Source: https://openclipart.org/detail/5556/flames
+Asset: https://openclipart.org/image/2000px/5556
+Uploader: mcol
+
+License: Creative Commons Zero 1.0 / public domain under Openclipart terms.
+Downloaded: 2026-07-21
+
+The application tints both transparent PNG assets with the active Rodion palette.

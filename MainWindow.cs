@@ -1,4 +1,5 @@
 using Avalonia;
+using Avalonia.Animation;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Input;
@@ -23,17 +24,33 @@ using Color = Avalonia.Media.Color;
 using ComboBox = Avalonia.Controls.ComboBox;
 using Control = Avalonia.Controls.Control;
 using HorizontalAlignment = Avalonia.Layout.HorizontalAlignment;
+using NumericUpDown = Avalonia.Controls.NumericUpDown;
 using Orientation = Avalonia.Layout.Orientation;
 using Point = Avalonia.Point;
 using ProgressBar = Avalonia.Controls.ProgressBar;
 using TextBox = Avalonia.Controls.TextBox;
 using ToolTip = Avalonia.Controls.ToolTip;
 using VerticalAlignment = Avalonia.Layout.VerticalAlignment;
+using AvaloniaBitmap = Avalonia.Media.Imaging.Bitmap;
+using AvaloniaImage = Avalonia.Controls.Image;
 
 namespace SmartShellCleanerAvalonia;
 
 public sealed class MainWindow : Window
 {
+    private sealed class ModalWindow : Window
+    {
+        public ModalWindow()
+        {
+            KeyDown += (_, e) =>
+            {
+                if (e.Key != Key.Escape) return;
+                e.Handled = true;
+                Close();
+            };
+        }
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct FlashWindowInfo
     {
@@ -49,17 +66,26 @@ public sealed class MainWindow : Window
 
     private const uint FlashTray = 2;
     private const uint FlashUntilForeground = 12;
+    private const string CleaningAuditEditorPhone = "79185625343";
+    private const string SonyaOperatorPhone = "79518418035";
+    private const string ArtemOperatorPhone = "79518369646";
+    private const string KirillOperatorPhone = "79951227218";
     private static readonly HashSet<string> CleaningAuditAccessPhones = new(StringComparer.Ordinal)
     {
         "79185625343",
         "79518369646"
     };
 
-    private static readonly SolidColorBrush PrimaryAccent = new(Color.Parse("#2f8cff"));
-    private static readonly SolidColorBrush BrightAccent = new(Color.Parse("#4ea1ff"));
-    private static readonly SolidColorBrush DeepAccent = new(Color.Parse("#102a4d"));
-    private static readonly SolidColorBrush SoftAccent = new(Color.Parse("#16243a"));
-    private static readonly SolidColorBrush AccentBorder = new(Color.Parse("#24466f"));
+    private static readonly SolidColorBrush PrimaryAccent = new(Color.Parse(UiLabAppearance.EffectiveAccent));
+    private static readonly SolidColorBrush BrightAccent = new(Color.Parse(UiLabAppearance.EffectiveBrightAccent));
+    private static readonly SolidColorBrush DeepAccent = new(Color.Parse(UiLabAppearance.EffectiveDeepAccent));
+    private static readonly SolidColorBrush SoftAccent = new(Color.Parse(UiLabAppearance.EffectiveSoftAccent));
+    private static readonly SolidColorBrush AccentBorder = new(Color.Parse(UiLabAppearance.EffectiveAccentBorder));
+    private static readonly Dictionary<string, SolidColorBrush> ThemeBrushes = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Lazy<AvaloniaBitmap?> DragonArtwork = new(() => LoadDragonArtwork("dragon-winged-cc0.png"));
+    private static readonly Lazy<AvaloniaBitmap?> DragonHeadArtwork = new(() => LoadDragonArtwork("dragon-head-cc0.png"));
+    private static readonly Lazy<AvaloniaBitmap?> DragonFlamesArtwork = new(() => LoadDragonArtwork("dragon-flames-cc0.png"));
+    private static readonly Lazy<AvaloniaBitmap?> DragonSceneArtwork = new(() => LoadDragonArtwork("rodion-dragon-night-art.png"));
 
     private sealed record BookingDraft(
         string ClientQuery,
@@ -81,6 +107,8 @@ public sealed class MainWindow : Window
         public string HostName { get; set; } = "";
         public DateTime ClientLeftAtUtc { get; set; }
         public DateTime? CleanedAtUtc { get; set; }
+        public DateTime? LastReminderAtUtc { get; set; }
+        public string SuspiciousReason { get; set; } = "";
     }
 
     private sealed class PendingCleaningAudit
@@ -88,6 +116,7 @@ public sealed class MainWindow : Window
         public string HostName { get; set; } = "";
         public string Operator { get; set; } = "";
         public DateTime ClientLeftAtUtc { get; set; }
+        public DateTime? LastReminderAtUtc { get; set; }
     }
 
     private sealed class CleaningAuditDocument
@@ -104,7 +133,7 @@ public sealed class MainWindow : Window
         public DateTime CreatedAtLocal { get; set; } = DateTime.Now;
         public string ClientUuid { get; set; } = "";
         public string ClientDisplay { get; set; } = "";
-        public string PaymentMethod { get; set; } = "CASH";
+        public string PaymentMethod { get; set; } = "";
         public List<CartItem> Items { get; set; } = new();
     }
 
@@ -113,10 +142,15 @@ public sealed class MainWindow : Window
     private readonly Dictionary<string, Point> layout = BuildLayout();
     private readonly Dictionary<string, PcRecord> records = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Button> navButtons = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Canvas mapCanvas = new() { Width = 960, Height = 700, Background = Brush("#080d12") };
-    private readonly ContentControl contentHost = new();
-    private readonly Border sidePanel = new();
-    private readonly StackPanel toastHost = new();
+    private readonly Canvas mapCanvas = new()
+    {
+        Width = 960,
+        Height = 700,
+        Background = UiLabAppearance.HasDragonMotif ? Brushes.Transparent : Brush("#080d12")
+    };
+    private TransitioningContentControl contentHost = CreateContentHost();
+    private Border sidePanel = new();
+    private StackPanel toastHost = new();
     private readonly System.Windows.Forms.NotifyIcon windowsNotifier = new();
     private readonly List<PsTimerSession> psTimers = new();
     private readonly List<ShopItem> allShopItems = new();
@@ -142,16 +176,17 @@ public sealed class MainWindow : Window
     private readonly Dictionary<string, Button> shopModeButtons = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Button> shopSortButtons = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Button> paymentButtons = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Button> debtPaymentButtons = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<AdminCallInfo> adminCalls = new();
     private readonly HashSet<int> knownAdminCallHostIds = new();
     private readonly string authBrowserProfileDir = Path.Combine(Path.GetTempPath(), "SmartShellCleanerBrowser-" + Guid.NewGuid().ToString("N"));
     private readonly DispatcherTimer psUiTimer = new();
     private readonly CancellationTokenSource browserBridgeCts = new();
-    private readonly TextBlock title = new();
-    private readonly TextBlock source = new();
-    private readonly TextBlock summary = new();
-    private readonly TextBlock selectedTitle = new();
-    private readonly TextBlock selectedBody = new();
+    private TextBlock title = new();
+    private TextBlock source = new();
+    private TextBlock summary = new();
+    private TextBlock selectedTitle = new();
+    private TextBlock selectedBody = new();
     private readonly DispatcherTimer timer = new();
     private ComboBox? psDeviceBox;
     private TextBox? psMinutesBox;
@@ -171,9 +206,14 @@ public sealed class MainWindow : Window
     private CheckBox? depositAlreadyCreditedBox;
     private TextBox? cashPartBox;
     private TextBox? cardPartBox;
+    private TextBox? cashReceivedBox;
     private TextBlock? selectedClientText;
     private TextBlock? storeStatusText;
     private TextBlock? cartTotalText;
+    private TextBlock? cashChangeText;
+    private StackPanel? cashChangePanel;
+    private Button? checkoutButton;
+    private Button? cleanedButton;
     private StackPanel? singleSelectionActions;
     private StackPanel? bulkSelectionActions;
     private StackPanel? computerGroupsHost;
@@ -188,6 +228,7 @@ public sealed class MainWindow : Window
     private Point? mapSelectionStart;
     private bool mapSelectionDragging;
     private bool mapSelectionAdditive;
+    private bool psTimerAttentionPending;
     private ClientInfo? selectedClient;
     private ApiAccessInfo? apiAccessInfo;
     private PcRecord? selected;
@@ -195,7 +236,8 @@ public sealed class MainWindow : Window
     private string shopMode = "GOOD";
     private string shopSortColumn = "title";
     private bool shopSortDescending;
-    private string paymentMethod = "CASH";
+    private string paymentMethod = "";
+    private string debtPaymentMethod = "CASH";
     private string computerSortColumn = "name";
     private bool computerSortDescending;
     private bool hostsLoadedOnce;
@@ -206,7 +248,7 @@ public sealed class MainWindow : Window
     private bool splitPaymentSyncing;
     private bool shopTabSyncing;
     private bool adminCallsLoadedOnce;
-    private bool purpleAccent;
+    private string appliedOperatorPaletteIdentity = "";
     private string activeShopTabId = "";
     private DateTime upcomingBookingsRefreshAfterUtc = DateTime.MinValue;
     private DateTime dashboardRefreshAfterUtc = DateTime.MinValue;
@@ -244,9 +286,6 @@ public sealed class MainWindow : Window
         foreach (var record in SmartShellService.BuildFallbackHosts())
             records[record.Name] = record;
 
-        selected = records.Values.FirstOrDefault();
-        if (selected != null)
-            selectedHostKeys.Add(selected.Name);
         SwitchScreen("map");
         RefreshMap();
         UpdateSelectedPanel();
@@ -296,56 +335,144 @@ public sealed class MainWindow : Window
 
     private Grid BuildRoot()
     {
+        var theme = UiLabAppearance.CurrentKey;
+        var topNavigation = IsTopNavigationShell();
+        var sidebarWidth = theme switch
+        {
+            "violet" => 84,
+            "material" => 96,
+            "suki" => 252,
+            _ => 216
+        };
+        var inspectorWidth = theme switch
+        {
+            "violet" => 304,
+            "suki" => 340,
+            "material" => 336,
+            _ => 320
+        };
+        var headerHeight = theme switch
+        {
+            "suki" => 82,
+            "material" => 64,
+            "violet" => 76,
+            _ => 70
+        };
         var root = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions("216,*,320"),
-            RowDefinitions = new RowDefinitions("70,*"),
+            ColumnDefinitions = topNavigation
+                ? new ColumnDefinitions($"*,{inspectorWidth}")
+                : new ColumnDefinitions($"{sidebarWidth},*,{inspectorWidth}"),
+            RowDefinitions = topNavigation
+                ? new RowDefinitions($"{headerHeight},58,*")
+                : new RowDefinitions($"{headerHeight},*"),
             Background = Brush("#080d12")
         };
 
+        if (UiLabAppearance.HasDragonMotif)
+        {
+            var dragonBackdrop = BuildDragonBackdrop();
+            Grid.SetRowSpan(dragonBackdrop, topNavigation ? 3 : 2);
+            Grid.SetColumnSpan(dragonBackdrop, topNavigation ? 2 : 3);
+            root.Children.Add(dragonBackdrop);
+        }
+
         var sidebar = BuildSidebar();
-        Grid.SetRowSpan(sidebar, 2);
+        if (topNavigation)
+        {
+            Grid.SetRow(sidebar, 1);
+            Grid.SetColumnSpan(sidebar, 2);
+        }
+        else
+        {
+            Grid.SetRowSpan(sidebar, 2);
+        }
         root.Children.Add(sidebar);
 
         var header = BuildHeader();
-        Grid.SetColumn(header, 1);
+        Grid.SetColumn(header, topNavigation ? 0 : 1);
         Grid.SetColumnSpan(header, 2);
         root.Children.Add(header);
 
-        contentHost.Margin = new Thickness(28, 24, 24, 24);
-        Grid.SetRow(contentHost, 1);
-        Grid.SetColumn(contentHost, 1);
+        contentHost.Margin = ContentMargin(false);
+        Grid.SetRow(contentHost, topNavigation ? 2 : 1);
+        Grid.SetColumn(contentHost, topNavigation ? 0 : 1);
         root.Children.Add(contentHost);
 
-        sidePanel.Margin = new Thickness(16, 28, 0, 24);
-        sidePanel.Padding = new Thickness(18);
-        sidePanel.Background = Brush("#121a24");
+        sidePanel.Margin = theme switch
+        {
+            "suki" => new Thickness(12, 20, 12, 20),
+            "material" => new Thickness(12, 20, 16, 20),
+            _ => new Thickness(16, 28, 0, 24)
+        };
+        sidePanel.Padding = new Thickness(theme == "material" ? 20 : 18);
+        sidePanel.Background = PanelBrush("#121b25", 146);
         sidePanel.BorderBrush = Brush("#263244");
         sidePanel.BorderThickness = new Thickness(1);
-        sidePanel.CornerRadius = new CornerRadius(10);
+        sidePanel.CornerRadius = new CornerRadius(theme switch { "suki" => 8, "material" => 6, "violet" => 4, _ => 10 });
         sidePanel.Child = BuildSideContent();
-        Grid.SetRow(sidePanel, 1);
-        Grid.SetColumn(sidePanel, 2);
+        Grid.SetRow(sidePanel, topNavigation ? 2 : 1);
+        Grid.SetColumn(sidePanel, topNavigation ? 1 : 2);
         root.Children.Add(sidePanel);
 
         toastHost.HorizontalAlignment = HorizontalAlignment.Right;
         toastHost.VerticalAlignment = VerticalAlignment.Bottom;
         toastHost.Margin = new Thickness(0, 0, 22, 22);
         toastHost.Spacing = 10;
-        Grid.SetRowSpan(toastHost, 2);
-        Grid.SetColumnSpan(toastHost, 3);
+        Grid.SetRowSpan(toastHost, topNavigation ? 3 : 2);
+        Grid.SetColumnSpan(toastHost, topNavigation ? 2 : 3);
         root.Children.Add(toastHost);
 
         return root;
     }
 
+    private static bool IsTopNavigationShell() => UiLabAppearance.CurrentKey is "semi" or "oled";
+
+    private static bool IsRailShell() => UiLabAppearance.CurrentKey is "violet" or "material";
+
+    private static Thickness ContentMargin(bool fullWidth)
+    {
+        return UiLabAppearance.CurrentKey switch
+        {
+            "suki" => new Thickness(24, 20, fullWidth ? 24 : 16, 24),
+            "material" => new Thickness(24, 20, fullWidth ? 24 : 16, 24),
+            "violet" => new Thickness(22, 20, fullWidth ? 22 : 14, 22),
+            "semi" => new Thickness(24, 20, fullWidth ? 24 : 16, 24),
+            "oled" => new Thickness(20, 18, fullWidth ? 20 : 12, 20),
+            _ => fullWidth ? new Thickness(28, 24, 28, 24) : new Thickness(28, 24, 24, 24)
+        };
+    }
+
+    private static IPageTransition CreatePageTransition()
+    {
+        return UiLabAppearance.CurrentKey switch
+        {
+            "semi" => new PageSlide(TimeSpan.FromMilliseconds(180), PageSlide.SlideAxis.Vertical),
+            "suki" => new PageSlide(TimeSpan.FromMilliseconds(240), PageSlide.SlideAxis.Horizontal),
+            "material" => new PageSlide(TimeSpan.FromMilliseconds(220), PageSlide.SlideAxis.Horizontal),
+            "oled" => new CrossFade(TimeSpan.FromMilliseconds(110)),
+            "violet" => new CrossFade(TimeSpan.FromMilliseconds(160)),
+            _ => new CrossFade(TimeSpan.FromMilliseconds(190))
+        };
+    }
+
+    private static TransitioningContentControl CreateContentHost() => new() { PageTransition = CreatePageTransition() };
+
     private Border BuildSidebar()
     {
+        if (IsTopNavigationShell())
+            return BuildTopNavigation();
+        if (IsRailShell())
+            return BuildNavigationRail();
+
+        var suki = UiLabAppearance.CurrentKey == "suki";
         var border = new Border
         {
             Background = Brush("#111820"),
             BorderBrush = Brush("#26313d"),
-            BorderThickness = new Thickness(0, 0, 1, 0)
+            BorderThickness = new Thickness(0, 0, 1, 0),
+            Margin = new Thickness(0),
+            CornerRadius = suki ? new CornerRadius(0, 8, 8, 0) : new CornerRadius(0)
         };
 
         var dock = new DockPanel();
@@ -389,15 +516,7 @@ public sealed class MainWindow : Window
             }
         });
 
-        top.Children.Add(NavButton("dashboard", "Дашборд", "dashboard"));
-        top.Children.Add(NavButton("computer", "Компьютеры", "details"));
-        top.Children.Add(NavButton("map", "Карта клуба", "map"));
-        top.Children.Add(NavButton("calendar", "Бронирование", "bookings"));
-        top.Children.Add(NavButton("goods", "Магазин", "shop"));
-        top.Children.Add(NavButton("payments", "Платежи", "payments"));
-        top.Children.Add(NavButton("clients", "Клиенты", "clients"));
-        top.Children.Add(NavButton("logs", "Логи", "logs"));
-        top.Children.Add(NavButton("logs", "Журнал уборки", "cleaning-log"));
+        AddMainNavigation(top);
         top.Children.Add(new Separator { Margin = new Thickness(0, 10), Background = Brush("#2b3442") });
         top.Children.Add(NavButton("gamepad", "Таймеры PS", "ps"));
         top.Children.Add(new Separator { Margin = new Thickness(0, 10), Background = Brush("#2b3442") });
@@ -423,11 +542,167 @@ public sealed class MainWindow : Window
         return border;
     }
 
+    private Border BuildTopNavigation()
+    {
+        var border = new Border
+        {
+            Background = Brush("#111820"),
+            BorderBrush = Brush("#26313d"),
+            BorderThickness = new Thickness(0, 0, 0, 1)
+        };
+        var grid = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            Margin = new Thickness(18, 6, 12, 6)
+        };
+        var nav = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+        AddMainNavigation(nav);
+        nav.Children.Add(NavButton("gamepad", "Таймеры PS", "ps"));
+        grid.Children.Add(new ScrollViewer
+        {
+            Content = nav,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled
+        });
+
+        addPcBox = new TextBox
+        {
+            Width = 76,
+            Height = 42,
+            Watermark = "ПК",
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            Background = Brush("#182231"),
+            Foreground = Brush("#f5f7ff"),
+            BorderBrush = Brush("#2b3550")
+        };
+        var actions = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 6,
+            Children =
+            {
+                addPcBox,
+                NavigationActionButton("add", "Добавить ПК", AddPcFromSidebar),
+                NavigationActionButton("clear", "Очистить уборку", ClearCleaningHistory),
+                NavigationActionButton("refresh", "Обновить", async () => await RefreshAsync()),
+                NavigationActionButton("external", "Открыть SmartShell", OpenSmartShellMap),
+                NavigationActionButton("settings", "SmartShell API", () => _ = ShowApiSettingsDialogAsync(false))
+            }
+        };
+        Grid.SetColumn(actions, 1);
+        grid.Children.Add(actions);
+        border.Child = grid;
+        return border;
+    }
+
+    private Border BuildNavigationRail()
+    {
+        var material = UiLabAppearance.CurrentKey == "material";
+        var border = new Border
+        {
+            Background = Brush("#111820"),
+            BorderBrush = Brush("#26313d"),
+            BorderThickness = new Thickness(0, 0, 1, 0)
+        };
+        var dock = new DockPanel();
+        border.Child = dock;
+
+        var brandMark = AppMark(material ? 32 : 36);
+        brandMark.Margin = new Thickness(0);
+        brandMark.HorizontalAlignment = HorizontalAlignment.Center;
+        var brand = new Border
+        {
+            Height = material ? 64 : 72,
+            Child = brandMark,
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+        DockPanel.SetDock(brand, Dock.Top);
+        dock.Children.Add(brand);
+
+        var bottom = new StackPanel
+        {
+            Width = 68,
+            Margin = new Thickness(0, 8, 0, 16),
+            Spacing = 6,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Bottom
+        };
+        DockPanel.SetDock(bottom, Dock.Bottom);
+        dock.Children.Add(bottom);
+        addPcBox = new TextBox
+        {
+            Watermark = "ПК",
+            Height = 34,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            Background = Brush("#182231"),
+            Foreground = Brush("#f5f7ff"),
+            BorderBrush = Brush("#2b3550")
+        };
+        bottom.Children.Add(addPcBox);
+        bottom.Children.Add(NavigationActionButton("refresh", "Обновить", async () => await RefreshAsync()));
+        bottom.Children.Add(NavigationActionButton("external", "Открыть SmartShell", OpenSmartShellMap));
+        bottom.Children.Add(NavigationActionButton("settings", "SmartShell API", () => _ = ShowApiSettingsDialogAsync(false)));
+        bottom.Children.Add(NavigationActionButton("clear", "Очистить уборку", ClearCleaningHistory));
+        bottom.Children.Add(NavigationActionButton("add", "Добавить ПК", AddPcFromSidebar));
+
+        var nav = new StackPanel
+        {
+            Width = 68,
+            Margin = new Thickness(0, 4),
+            Spacing = material ? 4 : 6,
+            HorizontalAlignment = HorizontalAlignment.Center
+        };
+        AddMainNavigation(nav);
+        nav.Children.Add(NavButton("gamepad", "PS", "ps"));
+        dock.Children.Add(new ScrollViewer
+        {
+            Content = nav,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+        });
+        return border;
+    }
+
+    private void AddMainNavigation(StackPanel panel)
+    {
+        panel.Children.Add(NavButton("dashboard", "Дашборд", "dashboard"));
+        panel.Children.Add(NavButton("computer", "Компьютеры", "details"));
+        panel.Children.Add(NavButton("map", "Карта клуба", "map"));
+        panel.Children.Add(NavButton("calendar", "Бронирование", "bookings"));
+        panel.Children.Add(NavButton("goods", "Магазин", "shop"));
+        panel.Children.Add(NavButton("payments", "Платежи", "payments"));
+        panel.Children.Add(NavButton("clients", "Клиенты", "clients"));
+        panel.Children.Add(NavButton("logs", "Логи", "logs"));
+        panel.Children.Add(NavButton("audit", "Журнал уборки", "cleaning-log"));
+    }
+
+    private Button NavigationActionButton(string icon, string tooltip, Action action)
+    {
+        var rail = IsRailShell();
+        var button = new Button
+        {
+            Width = IsTopNavigationShell() || rail ? 42 : double.NaN,
+            Height = IsTopNavigationShell() ? 42 : 38,
+            Padding = new Thickness(9),
+            HorizontalAlignment = rail ? HorizontalAlignment.Center : HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            Background = Brush("#182231"),
+            BorderBrush = Brush("#2b3550"),
+            Content = DashboardIcon(icon, "#cbd3df", 18)
+        };
+        ToolTip.SetTip(button, tooltip);
+        button.Click += (_, _) => action();
+        return button;
+    }
+
     private Grid BuildHeader()
     {
+        var theme = UiLabAppearance.CurrentKey;
+        var compactRail = IsRailShell();
         var header = new Grid
         {
-            Background = Brush("#080d12"),
+            Background = theme == "suki" ? Brush("#111820") : Brush("#080d12"),
             ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto")
         };
         header.PointerPressed += (_, e) =>
@@ -440,8 +715,8 @@ public sealed class MainWindow : Window
 
         var titleStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
         title.Foreground = Brush("#f5f7ff");
-        title.FontSize = 21;
-        title.FontWeight = FontWeight.SemiBold;
+        title.FontSize = theme switch { "suki" => 23, "material" => 20, "violet" => 19, _ => 21 };
+        title.FontWeight = theme == "material" ? FontWeight.Medium : FontWeight.SemiBold;
         source.Foreground = Brush("#8f9aad");
         source.FontSize = 12;
         source.Margin = new Thickness(0, 6, 0, 0);
@@ -451,17 +726,16 @@ public sealed class MainWindow : Window
         var brand = new StackPanel
         {
             Orientation = Orientation.Horizontal,
-            Margin = new Thickness(28, 0, 0, 0),
+            Margin = new Thickness(theme == "material" ? 22 : 28, 0, 0, 0),
             VerticalAlignment = VerticalAlignment.Center,
-            Children =
-            {
-                AppMark(34),
-                titleStack
-            }
+            Spacing = compactRail ? 0 : 10
         };
+        if (!compactRail && !IsTopNavigationShell())
+            brand.Children.Add(AppMark(34));
+        brand.Children.Add(titleStack);
         header.Children.Add(brand);
 
-        summary.Foreground = Brush("#7c8cff");
+        summary.Foreground = BrightAccent;
         summary.FontSize = 13;
         summary.FontWeight = FontWeight.SemiBold;
         summary.VerticalAlignment = VerticalAlignment.Center;
@@ -553,22 +827,37 @@ public sealed class MainWindow : Window
 
     private Control BuildHeaderClientSearch()
     {
+        const double searchWidth = 245;
         var search = new TextBox
         {
-            Width = 245,
+            Width = searchWidth,
             Height = 38,
             Watermark = "Найти клиента",
             Background = Brush("#101820"),
             Foreground = Brush("#f5f7ff"),
             BorderBrush = Brush("#344154"),
-            Padding = new Thickness(38, 0, 10, 0)
+            Padding = new Thickness(38, 0, 10, 0),
+            VerticalContentAlignment = VerticalAlignment.Center
         };
         var searchIcon = DashboardIcon("search", "#c9d3e6", 17);
         searchIcon.Margin = new Thickness(12, 0, 0, 0);
         searchIcon.HorizontalAlignment = HorizontalAlignment.Left;
         searchIcon.IsHitTestVisible = false;
-        var rows = new StackPanel { Spacing = 2, Margin = new Thickness(6) };
-        var popup = HeaderPopup(search, 320, rows);
+        var rows = new StackPanel
+        {
+            Spacing = 2,
+            Margin = new Thickness(6),
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+        var resultsScroll = new ScrollViewer
+        {
+            Content = rows,
+            MaxHeight = 260,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+        };
+        var popup = HeaderPopup(search, searchWidth, resultsScroll);
+        popup.Placement = PlacementMode.BottomEdgeAlignedLeft;
         var version = 0;
 
         async Task RenderAsync(string query, int currentVersion)
@@ -584,7 +873,7 @@ public sealed class MainWindow : Window
 
             try
             {
-                var clients = (await service.SearchClientsAsync(config, query, CancellationToken.None)).Take(8).ToList();
+                var clients = await service.SearchClientsAsync(config, query, CancellationToken.None);
                 if (currentVersion != version) return;
                 if (clients.Count == 0)
                 {
@@ -597,6 +886,7 @@ public sealed class MainWindow : Window
                         var item = new Button
                         {
                             MinHeight = 48,
+                            HorizontalAlignment = HorizontalAlignment.Stretch,
                             Background = Brushes.Transparent,
                             BorderBrush = Brushes.Transparent,
                             HorizontalContentAlignment = HorizontalAlignment.Stretch,
@@ -677,14 +967,101 @@ public sealed class MainWindow : Window
         var name = new TextBlock { Text = "Оператор", Foreground = Brush("#f5f7ff"), FontWeight = FontWeight.SemiBold };
         var phone = new TextBlock { Foreground = Brush("#8f9aad"), FontSize = 12 };
         var role = new TextBlock { Foreground = Brush("#17c964"), FontSize = 12 };
-        var theme = new ToggleSwitch
+        var themeOptions = new StackPanel { Spacing = 4, IsVisible = false };
+
+        Control ThemeLabel(UiPresetOption preset, bool compact)
         {
-            IsChecked = purpleAccent,
-            OnContent = "Фиолетовая",
-            OffContent = "Синяя",
-            Foreground = Brush("#f5f7ff")
+            var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"), ColumnSpacing = 10 };
+            grid.Children.Add(new Border
+            {
+                Width = 14,
+                Height = 14,
+                CornerRadius = new CornerRadius(3),
+                Background = new SolidColorBrush(Color.Parse(preset.Accent)),
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            var text = new StackPanel
+            {
+                Spacing = compact ? 0 : 2,
+                Children =
+                {
+                    new TextBlock { Text = preset.Title, Foreground = Brush("#f5f7ff"), FontWeight = FontWeight.SemiBold },
+                    new TextBlock { Text = preset.Library, Foreground = Brush("#8f9aad"), FontSize = 11, IsVisible = !compact }
+                }
+            };
+            Grid.SetColumn(text, 1);
+            grid.Children.Add(text);
+            var marker = new TextBlock
+            {
+                Text = compact ? "⌄" : (preset.Key == UiLabAppearance.CurrentKey ? "✓" : ""),
+                Foreground = preset.Key == UiLabAppearance.CurrentKey ? BrightAccent : Brush("#8f9aad"),
+                FontSize = compact ? 17 : 14,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            Grid.SetColumn(marker, 2);
+            grid.Children.Add(marker);
+            return grid;
+        }
+
+        var themeButton = new Button
+        {
+            Height = 42,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            Padding = new Thickness(12, 0),
+            Background = Brush("#182231"),
+            Foreground = Brush("#f5f7ff"),
+            BorderBrush = Brush("#2b3550"),
+            Content = ThemeLabel(UiLabAppearance.Current, true)
         };
-        theme.IsCheckedChanged += (_, _) => SetAccentTheme(theme.IsChecked == true);
+        var changeInfo = new TextBlock
+        {
+            Text = UiStyleDescription(UiLabAppearance.CurrentKey),
+            Foreground = Brush("#a9b2c5"),
+            FontSize = 11,
+            TextWrapping = TextWrapping.Wrap,
+            MaxWidth = 270
+        };
+        var paletteButton = new Button
+        {
+            Height = 38,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Left,
+            Padding = new Thickness(12, 0),
+            Background = Brush("#182231"),
+            Foreground = Brush("#f5f7ff"),
+            BorderBrush = Brush("#2b3550"),
+            Content = IconLabel("◉", UiLabAppearance.CustomPalette == null ? "Настроить палитру" : "Изменить свою палитру")
+        };
+
+        var themeItems = new List<(UiPresetOption Preset, Button Button)>();
+        foreach (var preset in UiLabAppearance.Options)
+        {
+            var item = new Button
+            {
+                Height = 48,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                HorizontalContentAlignment = HorizontalAlignment.Stretch,
+                Padding = new Thickness(12, 0),
+                Background = preset.Key == UiLabAppearance.CurrentKey ? SoftAccent : Brushes.Transparent,
+                BorderBrush = preset.Key == UiLabAppearance.CurrentKey ? AccentBorder : Brushes.Transparent,
+                Content = ThemeLabel(preset, false)
+            };
+            item.Click += (_, _) =>
+            {
+                if (preset.Key == UiLabAppearance.CurrentKey)
+                {
+                    themeOptions.IsVisible = false;
+                    return;
+                }
+
+                ApplyUiPreset(preset);
+            };
+            themeItems.Add((preset, item));
+            themeOptions.Children.Add(item);
+        }
+
+        themeButton.Click += (_, _) => themeOptions.IsVisible = !themeOptions.IsVisible;
         var body = new StackPanel
         {
             Spacing = 8,
@@ -696,10 +1073,24 @@ public sealed class MainWindow : Window
                 role,
                 new Border { Height = 1, Background = Brush("#334052"), Margin = new Thickness(0, 6) },
                 new TextBlock { Text = "Тема оформления", Foreground = Brush("#8f9aad"), FontSize = 12 },
-                theme
+                themeButton,
+                themeOptions,
+                changeInfo,
+                paletteButton,
+                new TextBlock
+                {
+                    Text = "Полная тема применится автоматически",
+                    Foreground = Brush("#778399"),
+                    FontSize = 11
+                }
             }
         };
-        var popup = HeaderPopup(button, 260, body);
+        var popup = HeaderPopup(button, 310, body);
+        paletteButton.Click += async (_, _) =>
+        {
+            popup.IsOpen = false;
+            await ShowPaletteEditorAsync();
+        };
         button.Click += async (_, _) =>
         {
             try
@@ -799,7 +1190,7 @@ public sealed class MainWindow : Window
 
     private async Task<ClientInfo?> ShowClientPickerAsync(string dialogTitle)
     {
-        var dialog = new Window
+        var dialog = new ModalWindow
         {
             Title = dialogTitle,
             Width = 520,
@@ -919,7 +1310,7 @@ public sealed class MainWindow : Window
     private async Task ShowCashOrderDialogAsync(string type)
     {
         var income = type.Equals("PKO", StringComparison.OrdinalIgnoreCase);
-        var dialog = new Window
+        var dialog = new ModalWindow
         {
             Title = income ? "Приходный ордер" : "Расходный ордер",
             Width = 440,
@@ -944,6 +1335,7 @@ public sealed class MainWindow : Window
         };
         var status = new TextBlock { Foreground = Brush("#ffb020"), TextWrapping = TextWrapping.Wrap };
         var submit = SalePrimaryButton(income ? "Внести" : "Списать");
+        submit.HorizontalAlignment = HorizontalAlignment.Stretch;
         submit.Click += async (_, _) =>
         {
             if (!TryParseMoney(amount.Text, out var sum) || sum <= 0)
@@ -1012,7 +1404,7 @@ public sealed class MainWindow : Window
             .Where(x => x.Type.Equals("GOOD", StringComparison.OrdinalIgnoreCase))
             .OrderBy(x => x.Title)
             .ToList();
-        var dialog = new Window
+        var dialog = new ModalWindow
         {
             Title = "Внесение на склад",
             Width = 900,
@@ -1116,6 +1508,7 @@ public sealed class MainWindow : Window
         }
 
         var submit = SalePrimaryButton("Внести на склад");
+        submit.HorizontalAlignment = HorizontalAlignment.Stretch;
         submit.Click += async (_, _) =>
         {
             var items = new List<Dictionary<string, object?>>();
@@ -1299,19 +1692,902 @@ public sealed class MainWindow : Window
         }
     }
 
-    private void SetAccentTheme(bool purple)
+    private void ApplyUiPreset(UiPresetOption preset)
     {
-        purpleAccent = purple;
-        PrimaryAccent.Color = Color.Parse(purple ? "#8b5cf6" : "#2f8cff");
-        BrightAccent.Color = Color.Parse(purple ? "#a78bfa" : "#4ea1ff");
-        DeepAccent.Color = Color.Parse(purple ? "#2c1f4d" : "#102a4d");
-        SoftAccent.Color = Color.Parse(purple ? "#251b3d" : "#16243a");
-        AccentBorder.Color = Color.Parse(purple ? "#5b3f8f" : "#24466f");
+        UiLabAppearance.Select(preset.Key);
+        ApplyAppearanceBrushes();
+        Dispatcher.UIThread.Post(RebuildShell);
+    }
+
+    private void ApplyAppearanceBrushes()
+    {
+        PrimaryAccent.Color = Color.Parse(UiLabAppearance.EffectiveAccent);
+        BrightAccent.Color = Color.Parse(UiLabAppearance.EffectiveBrightAccent);
+        DeepAccent.Color = Color.Parse(UiLabAppearance.EffectiveDeepAccent);
+        SoftAccent.Color = Color.Parse(UiLabAppearance.EffectiveSoftAccent);
+        AccentBorder.Color = Color.Parse(UiLabAppearance.EffectiveAccentBorder);
+        foreach (var pair in ThemeBrushes)
+            pair.Value.Color = ResolvedThemeColor(pair.Key);
+        Background = Brush("#080d12");
+        mapCanvas.Background = UiLabAppearance.HasDragonMotif ? Brushes.Transparent : Brush("#080d12");
+    }
+
+    private void RebuildShell()
+    {
+        var target = screen;
+        var sourceText = source.Text;
+        var summaryText = summary.Text;
+        var selectedTitleText = selectedTitle.Text;
+        var selectedBodyText = selectedBody.Text;
+
+        contentHost.PageTransition = null;
+        contentHost.Content = null;
+        if (mapScrollView != null)
+            mapScrollView.Content = null;
+        mapScrollView = null;
+        sidePanel.Child = null;
+        Content = null;
+        navButtons.Clear();
+
+        title = new TextBlock();
+        source = new TextBlock { Text = sourceText };
+        summary = new TextBlock { Text = summaryText };
+        selectedTitle = new TextBlock { Text = selectedTitleText };
+        selectedBody = new TextBlock { Text = selectedBodyText };
+        contentHost = CreateContentHost();
+        sidePanel = new Border();
+        toastHost = new StackPanel();
+
+        Content = BuildRoot();
+        SwitchScreen(target);
+        UpdateSelectedPanel();
+    }
+
+    private static string UiStyleDescription(string key)
+    {
+        return key switch
+        {
+            "smartshell" => "Классическая боковая панель · плавное затухание · знакомые иконки",
+            "violet" => "Компактный rail · больше места карте · фиолетовые активные состояния",
+            "semi" => "Верхняя командная лента · вертикальный переход экранов · минимальные иконки",
+            "suki" => "Широкий dock · просторные элементы · горизонтальное движение экранов",
+            "material" => "Navigation rail · строгая сетка · Material-иконки и состояния",
+            "oled" => "Верхняя навигация · быстрый crossfade · минимальная яркость фона",
+            _ => "Альтернативная компоновка интерфейса"
+        };
+    }
+
+    private async Task ShowPaletteEditorAsync()
+    {
+        var preset = UiLabAppearance.Current;
+        var custom = UiLabAppearance.CustomPalette;
+        var originalPalette = custom;
+        var motif = UiLabAppearance.ActiveMotif;
+        var colors = new Dictionary<string, Color>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["accent"] = Color.Parse(custom?.Accent ?? preset.Accent),
+            ["background"] = Color.Parse(custom?.Background ?? preset.Colors["#080d12"]),
+            ["surface"] = Color.Parse(custom?.Surface ?? preset.Colors["#111820"]),
+            ["border"] = Color.Parse(custom?.Border ?? preset.Colors["#263244"]),
+            ["text"] = Color.Parse(custom?.Text ?? preset.Colors["#f5f7ff"]),
+            ["dashboardPanel"] = Color.Parse(custom?.DashboardPanel ?? UiLabAppearance.DashboardPanel),
+            ["shopPanel"] = Color.Parse(custom?.ShopPanel ?? UiLabAppearance.ShopPanel),
+            ["psTimerPanel"] = Color.Parse(custom?.PsTimerPanel ?? UiLabAppearance.PsTimerPanel),
+            ["mapControlPanel"] = Color.Parse(custom?.MapControlPanel ?? UiLabAppearance.MapControlPanel),
+            ["pcFree"] = Color.Parse(custom?.PcFree ?? UiLabAppearance.PcFree),
+            ["pcLoggedIn"] = Color.Parse(custom?.PcLoggedIn ?? UiLabAppearance.PcLoggedIn),
+            ["pcSession"] = Color.Parse(custom?.PcSession ?? UiLabAppearance.PcSession),
+            ["pcCleaned"] = Color.Parse(custom?.PcCleaned ?? UiLabAppearance.PcCleaned),
+            ["pcService"] = Color.Parse(custom?.PcService ?? UiLabAppearance.PcService),
+            ["pcShellOff"] = Color.Parse(custom?.PcShellOff ?? UiLabAppearance.PcShellOff),
+            ["pcConnectionLost"] = Color.Parse(custom?.PcConnectionLost ?? UiLabAppearance.PcConnectionLost),
+            ["pcOffline"] = Color.Parse(custom?.PcOffline ?? UiLabAppearance.PcOffline)
+        };
+        var paletteButtons = new Dictionary<string, Button>(StringComparer.OrdinalIgnoreCase);
+        var paletteSwatches = new Dictionary<string, Border>(StringComparer.OrdinalIgnoreCase);
+        var statusPreviewCards = new Dictionary<string, Border>(StringComparer.OrdinalIgnoreCase);
+        var statusPreviewLabels = new Dictionary<string, TextBlock>(StringComparer.OrdinalIgnoreCase);
+        var panelPreviewCards = new Dictionary<string, Border>(StringComparer.OrdinalIgnoreCase);
+        var selectedKey = "accent";
+        var updatingPicker = false;
+        var pickerTitle = new TextBlock { Foreground = Brush("#f5f7ff"), FontSize = 18, FontWeight = FontWeight.SemiBold };
+        var pickerHint = new TextBlock { Foreground = Brush("#8f9aad"), FontSize = 12, TextWrapping = TextWrapping.Wrap };
+        var spectrum = new ColorSpectrum
+        {
+            HsvColor = colors[selectedKey].ToHsv(),
+            Height = 220,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            Shape = ColorSpectrumShape.Box,
+            Components = ColorSpectrumComponents.SaturationValue,
+            CornerRadius = new CornerRadius(6)
+        };
+        var hueSlider = new Avalonia.Controls.Primitives.ColorSlider
+        {
+            HsvColor = colors[selectedKey].ToHsv(),
+            ColorModel = ColorModel.Hsva,
+            ColorComponent = ColorComponent.Component1,
+            Orientation = Orientation.Horizontal,
+            Height = 36,
+            IsAlphaVisible = false,
+            IsPerceptive = true
+        };
+        var redInput = FineColorInput(colors[selectedKey].R);
+        var greenInput = FineColorInput(colors[selectedKey].G);
+        var blueInput = FineColorInput(colors[selectedKey].B);
+        var colorValue = new TextBlock
+        {
+            Foreground = Brush("#c9d3e6"),
+            FontSize = 13,
+            FontWeight = FontWeight.SemiBold,
+            HorizontalAlignment = HorizontalAlignment.Center
+        };
+
+        static string ToHex(Color color) => $"#{color.R:X2}{color.G:X2}{color.B:X2}";
+        UiCustomPalette CurrentPalette() => new(
+            ToHex(colors["accent"]),
+            ToHex(colors["background"]),
+            ToHex(colors["surface"]),
+            ToHex(colors["border"]),
+            ToHex(colors["text"]),
+            ToHex(colors["dashboardPanel"]),
+            ToHex(colors["shopPanel"]),
+            ToHex(colors["psTimerPanel"]),
+            ToHex(colors["mapControlPanel"]),
+            ToHex(colors["pcFree"]),
+            ToHex(colors["pcLoggedIn"]),
+            ToHex(colors["pcSession"]),
+            ToHex(colors["pcCleaned"]),
+            ToHex(colors["pcService"]),
+            ToHex(colors["pcShellOff"]),
+            ToHex(colors["pcConnectionLost"]),
+            ToHex(colors["pcOffline"]),
+            motif);
+
+        void ApplyPalette(UiCustomPalette palette)
+        {
+            colors["accent"] = Color.Parse(palette.Accent);
+            colors["background"] = Color.Parse(palette.Background);
+            colors["surface"] = Color.Parse(palette.Surface);
+            colors["border"] = Color.Parse(palette.Border);
+            colors["text"] = Color.Parse(palette.Text);
+            colors["dashboardPanel"] = Color.Parse(palette.DashboardPanel);
+            colors["shopPanel"] = Color.Parse(palette.ShopPanel);
+            colors["psTimerPanel"] = Color.Parse(palette.PsTimerPanel);
+            colors["mapControlPanel"] = Color.Parse(palette.MapControlPanel);
+            colors["pcFree"] = Color.Parse(palette.PcFree);
+            colors["pcLoggedIn"] = Color.Parse(palette.PcLoggedIn);
+            colors["pcSession"] = Color.Parse(palette.PcSession);
+            colors["pcCleaned"] = Color.Parse(palette.PcCleaned);
+            colors["pcService"] = Color.Parse(palette.PcService);
+            colors["pcShellOff"] = Color.Parse(palette.PcShellOff);
+            colors["pcConnectionLost"] = Color.Parse(palette.PcConnectionLost);
+            colors["pcOffline"] = Color.Parse(palette.PcOffline);
+            motif = palette.Motif;
+        }
+
+        void RenderStatusPreviews()
+        {
+            foreach (var pair in statusPreviewCards)
+            {
+                var color = colors[pair.Key];
+                pair.Value.BorderBrush = new SolidColorBrush(color);
+                pair.Value.Background = new SolidColorBrush(Color.FromArgb(46, color.R, color.G, color.B));
+                statusPreviewLabels[pair.Key].Foreground = new SolidColorBrush(color);
+            }
+        }
+
+        void RenderPanelPreviews()
+        {
+            foreach (var pair in panelPreviewCards)
+                pair.Value.Background = new SolidColorBrush(colors[pair.Key]);
+        }
+
+        void RenderSelectedColor()
+        {
+            var color = colors[selectedKey];
+            paletteSwatches[selectedKey].Background = new SolidColorBrush(color);
+            colorValue.Text = $"RGB {color.R}, {color.G}, {color.B}  ·  {ToHex(color)}";
+            redInput.Value = color.R;
+            greenInput.Value = color.G;
+            blueInput.Value = color.B;
+            UiLabAppearance.PreviewCustomPalette(CurrentPalette());
+            ApplyAppearanceBrushes();
+            RenderStatusPreviews();
+            RenderPanelPreviews();
+            if (screen == "map") RefreshMap();
+        }
+
+        void ApplyHsv(HsvColor hsv)
+        {
+            if (updatingPicker) return;
+            updatingPicker = true;
+            spectrum.HsvColor = hsv;
+            hueSlider.HsvColor = hsv;
+            colors[selectedKey] = hsv.ToRgb();
+            RenderSelectedColor();
+            updatingPicker = false;
+        }
+
+        void SelectColor(string key, string titleText, string hint)
+        {
+            selectedKey = key;
+            pickerTitle.Text = titleText;
+            pickerHint.Text = hint;
+            foreach (var pair in paletteButtons)
+            {
+                pair.Value.Background = pair.Key == key ? SoftAccent : Brush("#151d28");
+                pair.Value.BorderBrush = pair.Key == key ? BrightAccent : Brush("#263244");
+            }
+
+            ApplyHsv(colors[key].ToHsv());
+        }
+
+        spectrum.ColorChanged += (_, _) =>
+        {
+            if (updatingPicker) return;
+            ApplyHsv(spectrum.HsvColor);
+        };
+        hueSlider.ColorChanged += (_, _) =>
+        {
+            if (updatingPicker) return;
+            var current = spectrum.HsvColor;
+            ApplyHsv(new HsvColor(1, hueSlider.HsvColor.H, current.S, current.V));
+        };
+        void FineColorChanged()
+        {
+            if (updatingPicker || redInput.Value is not { } red || greenInput.Value is not { } green || blueInput.Value is not { } blue)
+                return;
+            ApplyHsv(Color.FromRgb((byte)red, (byte)green, (byte)blue).ToHsv());
+        }
+        redInput.ValueChanged += (_, _) => FineColorChanged();
+        greenInput.ValueChanged += (_, _) => FineColorChanged();
+        blueInput.ValueChanged += (_, _) => FineColorChanged();
+
+        Button PaletteOption(string key, string titleText, string hint)
+        {
+            var swatch = new Border
+            {
+                Width = 38,
+                Height = 38,
+                CornerRadius = new CornerRadius(6),
+                Background = new SolidColorBrush(colors[key]),
+                BorderBrush = Brush("#334052"),
+                BorderThickness = new Thickness(1),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            var content = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), ColumnSpacing = 12 };
+            content.Children.Add(swatch);
+            var labels = new StackPanel
+            {
+                Spacing = 2,
+                VerticalAlignment = VerticalAlignment.Center,
+                Children =
+                {
+                    new TextBlock { Text = titleText, Foreground = Brush("#f5f7ff"), FontWeight = FontWeight.SemiBold },
+                    new TextBlock { Text = hint, Foreground = Brush("#8f9aad"), FontSize = 11, TextTrimming = TextTrimming.CharacterEllipsis }
+                }
+            };
+            Grid.SetColumn(labels, 1);
+            content.Children.Add(labels);
+
+            var button = new Button
+            {
+                Height = 58,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                HorizontalContentAlignment = HorizontalAlignment.Stretch,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                Padding = new Thickness(10, 0),
+                Background = Brush("#151d28"),
+                BorderBrush = Brush("#263244"),
+                Content = content
+            };
+            button.Click += (_, _) => SelectColor(key, titleText, hint);
+            paletteButtons[key] = button;
+            paletteSwatches[key] = swatch;
+            return button;
+        }
+
+        Border StatusPreview(string key, string number, string title, string detail)
+        {
+            var colorText = new TextBlock
+            {
+                Text = number,
+                Foreground = new SolidColorBrush(colors[key]),
+                FontSize = 15,
+                FontWeight = FontWeight.SemiBold
+            };
+            var card = new Border
+            {
+                Height = 92,
+                Margin = new Thickness(4),
+                Padding = new Thickness(10, 8),
+                CornerRadius = new CornerRadius(7),
+                BorderThickness = new Thickness(2),
+                Child = new StackPanel
+                {
+                    Spacing = 5,
+                    Children =
+                    {
+                        colorText,
+                        new TextBlock { Text = title, Foreground = Brush("#f5f7ff"), FontSize = 12, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis },
+                        new TextBlock { Text = detail, Foreground = Brush("#8f9aad"), FontSize = 11, TextTrimming = TextTrimming.CharacterEllipsis }
+                    }
+                }
+            };
+            statusPreviewCards[key] = card;
+            statusPreviewLabels[key] = colorText;
+            return card;
+        }
+
+        Border PanelPreview(string key, string title, string detail)
+        {
+            var card = new Border
+            {
+                Height = 72,
+                Margin = new Thickness(4),
+                Padding = new Thickness(12, 9),
+                CornerRadius = new CornerRadius(7),
+                BorderBrush = Brush("#263244"),
+                BorderThickness = new Thickness(1),
+                Child = new StackPanel
+                {
+                    Spacing = 5,
+                    Children =
+                    {
+                        new TextBlock { Text = title, Foreground = Brush("#f5f7ff"), FontSize = 12, FontWeight = FontWeight.SemiBold },
+                        new TextBlock { Text = detail, Foreground = Brush("#8f9aad"), FontSize = 11, TextTrimming = TextTrimming.CharacterEllipsis }
+                    }
+                }
+            };
+            panelPreviewCards[key] = card;
+            return card;
+        }
+
+        var panelPreviewGrid = new UniformGrid { Columns = 4, Rows = 1 };
+        panelPreviewGrid.Children.Add(PanelPreview("dashboardPanel", "Дашборд", "Выручка и показатели"));
+        panelPreviewGrid.Children.Add(PanelPreview("shopPanel", "Магазин", "Клиент и корзина"));
+        panelPreviewGrid.Children.Add(PanelPreview("psTimerPanel", "Таймеры PS", "PS1 · осталось 02:15"));
+        panelPreviewGrid.Children.Add(PanelPreview("mapControlPanel", "Карта клуба", "Управление выбранным ПК"));
+        RenderPanelPreviews();
+
+        var statusPreviewGrid = new UniformGrid { Columns = 4, Rows = 2 };
+        statusPreviewGrid.Children.Add(StatusPreview("pcFree", "04", "Свободен", "ПК включён"));
+        statusPreviewGrid.Children.Add(StatusPreview("pcLoggedIn", "31", "Клиент вошёл", "без тарифа"));
+        statusPreviewGrid.Children.Add(StatusPreview("pcSession", "05", "Активная сессия", "до 19:55"));
+        statusPreviewGrid.Children.Add(StatusPreview("pcCleaned", "20", "Убран", "готов к посадке"));
+        statusPreviewGrid.Children.Add(StatusPreview("pcService", "14", "Обслуживание", "высокий доступ"));
+        statusPreviewGrid.Children.Add(StatusPreview("pcShellOff", "24", "Shell отключён", "нужна проверка"));
+        statusPreviewGrid.Children.Add(StatusPreview("pcConnectionLost", "09", "Нет связи", "сеанс прерван"));
+        statusPreviewGrid.Children.Add(StatusPreview("pcOffline", "18", "Выключен", "офлайн"));
+        RenderStatusPreviews();
+
+        var interfaceOptions = new (string Key, string Title, string Hint)[]
+        {
+            ("accent", "Акцент", "Кнопки и активные состояния"),
+            ("background", "Фон", "Основной фон приложения"),
+            ("surface", "Поверхность", "Панели, таблицы и карточки"),
+            ("border", "Граница", "Разделители и контуры"),
+            ("text", "Текст", "Основной читаемый текст")
+        };
+        var panelOptions = new (string Key, string Title, string Hint)[]
+        {
+            ("dashboardPanel", "Панели дашборда", "Карточки показателей и таблиц дашборда"),
+            ("shopPanel", "Панели магазина", "Клиент, ассортимент и корзина"),
+            ("psTimerPanel", "Панели таймеров PS", "Карточки активных и завершённых таймеров"),
+            ("mapControlPanel", "Панель карты клуба", "Информация и кнопки управления выбранным ПК")
+        };
+        var statusOptions = new (string Key, string Title, string Hint)[]
+        {
+            ("pcFree", "Включён и свободен", "ПК работает, клиент не авторизован"),
+            ("pcLoggedIn", "Клиент авторизован", "Клиент вошёл, но тариф ещё не запущен"),
+            ("pcSession", "Активная сессия", "Клиент использует оплаченный тариф"),
+            ("pcCleaned", "ПК убран", "Место подготовлено для следующего клиента"),
+            ("pcService", "Обслуживание", "Сервисный режим или высокий доступ"),
+            ("pcShellOff", "Shell отключён", "Оболочка снята или заблокирована"),
+            ("pcConnectionLost", "Потеря связи", "Связь пропала во время активной сессии"),
+            ("pcOffline", "ПК выключен", "Компьютер находится офлайн")
+        };
+        var paletteList = new StackPanel { Spacing = 8 };
+        var interfaceGroupButton = new Button { Content = "Интерфейс", Height = 40, HorizontalContentAlignment = HorizontalAlignment.Center, VerticalContentAlignment = VerticalAlignment.Center };
+        var panelGroupButton = new Button { Content = "Панели", Height = 40, HorizontalContentAlignment = HorizontalAlignment.Center, VerticalContentAlignment = VerticalAlignment.Center };
+        var statusGroupButton = new Button { Content = "Статусы ПК", Height = 40, HorizontalContentAlignment = HorizontalAlignment.Center, VerticalContentAlignment = VerticalAlignment.Center };
+        var showingGroup = "interface";
+
+        void RenderPaletteGroup(string group)
+        {
+            showingGroup = group;
+            paletteButtons.Clear();
+            paletteSwatches.Clear();
+            paletteList.Children.Clear();
+            var options = group switch
+            {
+                "panels" => panelOptions,
+                "statuses" => statusOptions,
+                _ => interfaceOptions
+            };
+            foreach (var option in options)
+                paletteList.Children.Add(PaletteOption(option.Key, option.Title, option.Hint));
+
+            foreach (var pair in new[]
+                     {
+                         (Button: interfaceGroupButton, Active: group == "interface"),
+                         (Button: panelGroupButton, Active: group == "panels"),
+                         (Button: statusGroupButton, Active: group == "statuses")
+                     })
+            {
+                pair.Button.Background = pair.Active ? SoftAccent : Brush("#151d28");
+                pair.Button.BorderBrush = pair.Active ? BrightAccent : Brush("#263244");
+            }
+            SelectColor(options[0].Key, options[0].Title, options[0].Hint);
+        }
+
+        interfaceGroupButton.Click += (_, _) => RenderPaletteGroup("interface");
+        panelGroupButton.Click += (_, _) => RenderPaletteGroup("panels");
+        statusGroupButton.Click += (_, _) => RenderPaletteGroup("statuses");
+        var groupTabs = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,*,*"),
+            ColumnSpacing = 8,
+            Children = { interfaceGroupButton, panelGroupButton, statusGroupButton }
+        };
+        Grid.SetColumn(panelGroupButton, 1);
+        Grid.SetColumn(statusGroupButton, 2);
+        var paletteLeft = new StackPanel { Spacing = 10, Children = { groupTabs, paletteList } };
+
+        var savedPaletteBox = new ComboBox
+        {
+            Height = 40,
+            Background = Brush("#182231"),
+            Foreground = Brush("#f5f7ff"),
+            BorderBrush = Brush("#2b3550"),
+            Padding = new Thickness(10, 0),
+            VerticalContentAlignment = VerticalAlignment.Center
+        };
+        var paletteNameBox = new TextBox
+        {
+            Height = 40,
+            Watermark = "Название палитры",
+            Background = Brush("#182231"),
+            Foreground = Brush("#f5f7ff"),
+            BorderBrush = Brush("#2b3550"),
+            Padding = new Thickness(10, 0),
+            VerticalContentAlignment = VerticalAlignment.Center
+        };
+        var savedPaletteStatus = new TextBlock
+        {
+            Foreground = Brush("#8f9aad"),
+            FontSize = 12,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis
+        };
+        var refreshingSavedPaletteSelection = false;
+        void RefreshSavedPalettes(string? selectedName = null)
+        {
+            refreshingSavedPaletteSelection = true;
+            var names = UiLabAppearance.SavedPalettes.Select(x => x.Name).OrderBy(x => x).ToList();
+            savedPaletteBox.ItemsSource = names;
+            if (selectedName != null)
+                savedPaletteBox.SelectedItem = names.FirstOrDefault(x => x.Equals(selectedName, StringComparison.OrdinalIgnoreCase));
+            else
+                savedPaletteBox.SelectedItem = names.FirstOrDefault(x => x.Equals(UiLabAppearance.ActivePaletteName, StringComparison.OrdinalIgnoreCase));
+            refreshingSavedPaletteSelection = false;
+        }
+        Button SavedPaletteButton(string text) => new()
+        {
+            Content = text,
+            Height = 40,
+            Padding = new Thickness(12, 0),
+            Background = Brush("#182231"),
+            Foreground = Brush("#f5f7ff"),
+            BorderBrush = Brush("#2b3550"),
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center
+        };
+        var loadNamedPalette = SavedPaletteButton("Загрузить");
+        var saveNamedPalette = SavedPaletteButton("Сохранить как");
+        var deleteNamedPalette = SavedPaletteButton("Удалить");
+        void ActivateSavedPalette(string name)
+        {
+            var saved = UiLabAppearance.SavedPalettes.FirstOrDefault(x => x.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            if (saved == null) return;
+            ApplyPalette(saved.Palette);
+            UiLabAppearance.ActivateNamedPalette(name);
+            originalPalette = saved.Palette;
+            RenderPaletteGroup(showingGroup);
+            ApplyAppearanceBrushes();
+            Dispatcher.UIThread.Post(RebuildShell);
+            savedPaletteStatus.Text = "Палитра загружена";
+        }
+        savedPaletteBox.SelectionChanged += (_, _) =>
+        {
+            if (savedPaletteBox.SelectedItem is string name)
+            {
+                paletteNameBox.Text = name;
+                if (!refreshingSavedPaletteSelection)
+                    ActivateSavedPalette(name);
+            }
+        };
+        loadNamedPalette.Click += (_, _) =>
+        {
+            if (savedPaletteBox.SelectedItem is not string name) return;
+            ActivateSavedPalette(name);
+        };
+        saveNamedPalette.Click += (_, _) =>
+        {
+            var name = paletteNameBox.Text?.Trim() ?? "";
+            if (name.Length == 0)
+            {
+                savedPaletteStatus.Text = "Укажите название";
+                return;
+            }
+            var palette = CurrentPalette();
+            UiLabAppearance.SaveNamedPalette(name, palette);
+            var saved = UiLabAppearance.SavedPalettes.First(x => x.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            ApplyPalette(saved.Palette);
+            originalPalette = saved.Palette;
+            RefreshSavedPalettes(name);
+            ApplyAppearanceBrushes();
+            Dispatcher.UIThread.Post(RebuildShell);
+            savedPaletteStatus.Text = "Палитра сохранена";
+        };
+        deleteNamedPalette.Click += (_, _) =>
+        {
+            if (savedPaletteBox.SelectedItem is not string name) return;
+            UiLabAppearance.DeleteNamedPalette(name);
+            paletteNameBox.Text = "";
+            RefreshSavedPalettes();
+            ApplyAppearanceBrushes();
+            Dispatcher.UIThread.Post(RebuildShell);
+            savedPaletteStatus.Text = "Палитра удалена";
+        };
+        var savedPaletteBar = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("230,210,100,130,90,*"),
+            ColumnSpacing = 8,
+            Children = { savedPaletteBox, paletteNameBox, loadNamedPalette, saveNamedPalette, deleteNamedPalette, savedPaletteStatus }
+        };
+        Grid.SetColumn(paletteNameBox, 1);
+        Grid.SetColumn(loadNamedPalette, 2);
+        Grid.SetColumn(saveNamedPalette, 3);
+        Grid.SetColumn(deleteNamedPalette, 4);
+        Grid.SetColumn(savedPaletteStatus, 5);
+        RefreshSavedPalettes();
+
+        var dialog = new ModalWindow
+        {
+            Title = "Палитра интерфейса",
+            Width = 1160,
+            Height = 860,
+            MinWidth = 980,
+            MinHeight = 720,
+            CanResize = true,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Background = Brush("#080d12")
+        };
+        var save = new Button
+        {
+            Content = "Сохранить палитру",
+            Height = 42,
+            Padding = new Thickness(18, 0),
+            Background = PrimaryAccent,
+            Foreground = Brush("#f5f7ff"),
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center
+        };
+        var reset = new Button
+        {
+            Content = "Вернуть цвета стиля",
+            Height = 42,
+            Padding = new Thickness(18, 0),
+            Background = Brush("#182231"),
+            Foreground = Brush("#f5f7ff"),
+            BorderBrush = Brush("#2b3550"),
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center
+        };
+        var paletteCommitted = false;
+        var cancel = new Button
+        {
+            Content = "Отмена",
+            Height = 42,
+            Padding = new Thickness(18, 0),
+            Background = Brushes.Transparent,
+            Foreground = Brush("#a9b2c5"),
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center
+        };
+        save.Click += (_, _) =>
+        {
+            UiLabAppearance.SetCustomPalette(CurrentPalette());
+            paletteCommitted = true;
+            dialog.Close();
+            ApplyAppearanceBrushes();
+            Dispatcher.UIThread.Post(RebuildShell);
+        };
+        reset.Click += (_, _) =>
+        {
+            UiLabAppearance.ResetCustomPalette();
+            paletteCommitted = true;
+            dialog.Close();
+            ApplyAppearanceBrushes();
+            Dispatcher.UIThread.Post(RebuildShell);
+        };
+        cancel.Click += (_, _) => dialog.Close();
+        dialog.Closing += (_, _) =>
+        {
+            if (paletteCommitted) return;
+            UiLabAppearance.PreviewCustomPalette(originalPalette);
+            ApplyAppearanceBrushes();
+            if (screen == "map") RefreshMap();
+        };
+
+        var fineGrid = new Grid { ColumnDefinitions = new ColumnDefinitions("*,*,*"), ColumnSpacing = 10 };
+        fineGrid.Children.Add(FineColorChannel("R", "#ff5252", redInput));
+        var greenChannel = FineColorChannel("G", "#35d07f", greenInput);
+        Grid.SetColumn(greenChannel, 1);
+        fineGrid.Children.Add(greenChannel);
+        var blueChannel = FineColorChannel("B", "#4ea1ff", blueInput);
+        Grid.SetColumn(blueChannel, 2);
+        fineGrid.Children.Add(blueChannel);
+
+        var picker = new Border
+        {
+            Background = Brush("#111820"),
+            BorderBrush = Brush("#263244"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(18),
+            Child = new StackPanel
+            {
+                Spacing = 14,
+                Children =
+                {
+                    pickerTitle,
+                    pickerHint,
+                    spectrum,
+                    hueSlider,
+                    colorValue,
+                    fineGrid
+                }
+            }
+        };
+        var statusPreview = new Border
+        {
+            Background = Brush("#111820"),
+            BorderBrush = Brush("#263244"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(12),
+            Child = new StackPanel
+            {
+                Spacing = 8,
+                Children =
+                {
+                    new TextBlock { Text = "Живой пример панелей", Foreground = Brush("#f5f7ff"), FontWeight = FontWeight.SemiBold },
+                    panelPreviewGrid,
+                    new TextBlock { Text = "Карта клуба", Foreground = Brush("#f5f7ff"), FontWeight = FontWeight.SemiBold, Margin = new Thickness(4, 4, 0, 0) },
+                    statusPreviewGrid
+                }
+            }
+        };
+        var pickerColumn = new StackPanel { Spacing = 12, Children = { picker, statusPreview } };
+        var paletteGrid = new Grid { ColumnDefinitions = new ColumnDefinitions("320,*"), ColumnSpacing = 16 };
+        paletteGrid.Children.Add(paletteLeft);
+        Grid.SetColumn(pickerColumn, 1);
+        paletteGrid.Children.Add(pickerColumn);
+
+        var paletteHeading = new TextBlock
+        {
+            Text = "Своя палитра",
+            Foreground = Brush("#f5f7ff"),
+            FontSize = 22,
+            FontWeight = FontWeight.SemiBold
+        };
+        var paletteDescription = new TextBlock
+        {
+            Text = "Настройте интерфейс и состояния компьютеров. Все изменения сразу видны в примере и на карте клуба.",
+            Foreground = Brush("#8f9aad"),
+            TextWrapping = TextWrapping.Wrap
+        };
+        var paletteScroll = new ScrollViewer
+        {
+            Content = paletteGrid,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+        };
+        var paletteFooter = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 8, 0, 0),
+            Children = { cancel, reset, save }
+        };
+        var paletteRoot = new Grid
+        {
+            RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*,Auto"),
+            RowSpacing = 12,
+            Children = { paletteHeading, paletteDescription, savedPaletteBar, paletteScroll, paletteFooter }
+        };
+        Grid.SetRow(paletteDescription, 1);
+        Grid.SetRow(savedPaletteBar, 2);
+        Grid.SetRow(paletteScroll, 3);
+        Grid.SetRow(paletteFooter, 4);
+
+        dialog.Content = new Border
+        {
+            Padding = new Thickness(24),
+            Background = Brush("#0d1217"),
+            Child = paletteRoot
+        };
+        RenderPaletteGroup("interface");
+        await dialog.ShowDialog(this);
+    }
+
+    private static NumericUpDown FineColorInput(byte value) => new()
+    {
+        Value = value,
+        Minimum = 0,
+        Maximum = 255,
+        Increment = 1,
+        FormatString = "0",
+        Height = 38,
+        MinWidth = 118,
+        HorizontalAlignment = HorizontalAlignment.Stretch,
+        Background = Brush("#182231"),
+        Foreground = Brush("#f5f7ff"),
+        BorderBrush = Brush("#2b3550"),
+        FontSize = 13,
+        Padding = new Thickness(8, 0),
+        TextAlignment = TextAlignment.Center
+    };
+
+    private static Control FineColorChannel(string label, string color, NumericUpDown input)
+    {
+        var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("30,*"), ColumnSpacing = 8 };
+        grid.Children.Add(new Border
+        {
+            Width = 28,
+            Height = 28,
+            CornerRadius = new CornerRadius(5),
+            Background = new SolidColorBrush(Color.Parse(color)),
+            VerticalAlignment = VerticalAlignment.Center,
+            Child = new TextBlock
+            {
+                Text = label,
+                Foreground = new SolidColorBrush(Color.Parse("#ffffff")),
+                FontWeight = FontWeight.Bold,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            }
+        });
+        Grid.SetColumn(input, 1);
+        grid.Children.Add(input);
+        return new Border
+        {
+            Background = Brush("#151d28"),
+            BorderBrush = Brush("#263244"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(6),
+            Padding = new Thickness(8),
+            Child = grid
+        };
+    }
+
+    private static AvaloniaBitmap? LoadDragonArtwork(string assetName)
+    {
+        try
+        {
+            return new AvaloniaBitmap(AssetLoader.Open(new Uri(
+                "avares://SmartShellCleaner.Avalonia/Assets/" + assetName)));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private Border DragonArtworkLayer(
+        AvaloniaBitmap? artwork,
+        double width,
+        double height,
+        double opacity,
+        Stretch stretch = Stretch.Uniform)
+    {
+        return new Border
+        {
+            Width = width,
+            Height = height,
+            Background = BrightAccent,
+            Opacity = artwork is null ? 0 : opacity,
+            OpacityMask = artwork is null
+                ? null
+                : new ImageBrush
+                {
+                    Source = artwork,
+                    Stretch = stretch
+                },
+            IsHitTestVisible = false
+        };
+    }
+
+    private Border DragonSilhouette(double width, double opacity) =>
+        DragonArtworkLayer(DragonArtwork.Value, width, width * 0.72, opacity);
+
+    private Border DragonHead(double width, double height, double opacity) =>
+        DragonArtworkLayer(DragonHeadArtwork.Value, width, height, opacity);
+
+    private Grid BuildDragonBackdrop()
+    {
+        var layer = new Grid
+        {
+            ClipToBounds = true,
+            IsHitTestVisible = false
+        };
+
+        var sceneArtwork = DragonSceneArtwork.Value;
+        if (sceneArtwork is not null)
+        {
+            layer.Children.Add(new AvaloniaImage
+            {
+                Source = sceneArtwork,
+                Stretch = Stretch.Uniform,
+                Opacity = 0.25,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Stretch,
+                IsHitTestVisible = false
+            });
+        }
+
+        return layer;
+    }
+
+    private Control WithDragonWatermark(Control content, double size, double opacity)
+    {
+        if (!UiLabAppearance.HasDragonMotif || DragonHeadArtwork.Value is null)
+            return content;
+
+        var layer = new Grid { ClipToBounds = true };
+        var dragon = DragonHead(size * 0.86, size, opacity);
+        dragon.HorizontalAlignment = HorizontalAlignment.Right;
+        dragon.VerticalAlignment = VerticalAlignment.Top;
+        dragon.Margin = new Thickness(0, 8, 8, 0);
+        layer.Children.Add(dragon);
+        layer.Children.Add(content);
+        return layer;
     }
 
     private Border AppMark(double size)
     {
-        return new Border
+        Control mark;
+        if (UiLabAppearance.HasDragonMotif && DragonHeadArtwork.Value is not null)
+        {
+            var dragon = DragonHead(size * 0.92, size * 0.94, 1);
+            dragon.HorizontalAlignment = HorizontalAlignment.Center;
+            dragon.VerticalAlignment = VerticalAlignment.Center;
+            mark = dragon;
+        }
+        else if (UiLabAppearance.HasSpiderMotif || UiLabAppearance.HasCatMotif)
+        {
+            var icon = UiLabAppearance.HasSpiderMotif ? "spider" : "cat";
+            var motif = DashboardIcon(icon, "#4ea1ff", size * 0.72);
+            motif.HorizontalAlignment = HorizontalAlignment.Center;
+            mark = motif;
+        }
+        else
+        {
+            mark = new TextBlock
+            {
+                Text = "S",
+                Foreground = Brush("#4ea1ff"),
+                FontWeight = FontWeight.Bold,
+                FontSize = size * 0.56,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+        }
+
+        var border = new Border
         {
             Width = size,
             Height = size,
@@ -1320,16 +2596,15 @@ public sealed class MainWindow : Window
             BorderBrush = Brush("#2f8cff"),
             BorderThickness = new Thickness(1),
             Margin = new Thickness(0, 0, 12, 0),
-            Child = new TextBlock
-            {
-                Text = "S",
-                Foreground = Brush("#4ea1ff"),
-                FontWeight = FontWeight.Bold,
-                FontSize = size * 0.56,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
-            }
+            Child = mark
         };
+        if (UiLabAppearance.HasDragonMotif)
+            ToolTip.SetTip(border, "Драконья палитра «Родион»");
+        else if (UiLabAppearance.HasSpiderMotif)
+            ToolTip.SetTip(border, "Паучья палитра «Соня»");
+        else if (UiLabAppearance.HasCatMotif)
+            ToolTip.SetTip(border, "Кошачья палитра «Артём»");
+        return border;
     }
 
     private Button WindowButton(string text, Action action, bool danger = false)
@@ -1367,11 +2642,12 @@ public sealed class MainWindow : Window
         selectedBody.TextWrapping = TextWrapping.Wrap;
         selectedBody.Margin = new Thickness(0, 14, 0, 20);
 
+        cleanedButton = AccentButton("Да, убран", () => _ = MarkSelectedCleanedAsync());
         singleSelectionActions = new StackPanel
         {
             Children =
             {
-                AccentButton("Да, убран", () => _ = MarkSelectedCleanedAsync()),
+                cleanedButton,
                 GhostButton("Панель управления", () => _ = OpenGroupedControlPanelAsync(selected)),
                 GhostButton("Напомнить", () => ShowToast("Напоминание", "Оставил задачу уборки активной.")),
                 GhostButton("Освободился", MarkSelectedFree),
@@ -1411,7 +2687,8 @@ public sealed class MainWindow : Window
             FontWeight = FontWeight.SemiBold,
             Margin = new Thickness(0, 0, 0, 8)
         });
-        bulkSelectionActions.Children.Add(BulkActionButton("✓  Убран", true, () => _ = MarkSelectedCleanedAsync(), accent: true));
+        bulkSelectionActions.Children.Add(BulkActionButton("✓  Убран", hosts.Any(NeedsCleaning),
+            () => _ = MarkSelectedCleanedAsync(), accent: true));
         bulkSelectionActions.Children.Add(BulkActionButton("◷  Напомнить", hosts.Any(x => x.CleaningStatus == "Нужно убрать"),
             () => ShowToast("Напоминание", "Задачи уборки для выбранных ПК оставлены активными.")));
         bulkSelectionActions.Children.Add(BulkActionButton("○  Освободился", true, MarkSelectedFree));
@@ -1457,11 +2734,16 @@ public sealed class MainWindow : Window
 
     private Button NavButton(string icon, string text, string target)
     {
+        var rail = IsRailShell();
+        var top = IsTopNavigationShell();
         var button = new Button
         {
-            Height = 38,
-            Padding = new Thickness(14, 0, 10, 0),
-            HorizontalContentAlignment = HorizontalAlignment.Left,
+            Height = rail ? (UiLabAppearance.CurrentKey == "material" ? 58 : 54) : top ? 44 : UiLabAppearance.CurrentKey == "suki" ? 44 : 38,
+            Width = rail ? 68 : double.NaN,
+            MinWidth = top ? 92 : 0,
+            Padding = rail ? new Thickness(4, 5) : top ? new Thickness(14, 0) : new Thickness(14, 0, 10, 0),
+            HorizontalAlignment = rail ? HorizontalAlignment.Center : HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = rail ? HorizontalAlignment.Center : HorizontalAlignment.Left,
             BorderThickness = new Thickness(0),
             Content = SidebarNavLabel(icon, text),
             IsVisible = target != "cleaning-log" || CanViewCleaningAudit()
@@ -1474,18 +2756,29 @@ public sealed class MainWindow : Window
 
     private StackPanel SidebarNavLabel(string icon, string text)
     {
+        var rail = IsRailShell();
+        var navIcon = DashboardIcon(icon, "#cbd3df", rail ? 20 : 18);
+        navIcon.HorizontalAlignment = rail ? HorizontalAlignment.Center : HorizontalAlignment.Left;
         return new StackPanel
         {
-            Orientation = Orientation.Horizontal,
-            Spacing = 11,
+            Width = rail ? 60 : double.NaN,
+            Orientation = rail ? Orientation.Vertical : Orientation.Horizontal,
+            Spacing = rail ? 3 : 11,
+            HorizontalAlignment = rail ? HorizontalAlignment.Center : HorizontalAlignment.Left,
             Children =
             {
-                DashboardIcon(icon, "#cbd3df", 18),
+                navIcon,
                 new TextBlock
                 {
                     Text = text,
+                    Width = rail ? 60 : double.NaN,
                     Foreground = Brush("#f5f7ff"),
-                    FontWeight = FontWeight.SemiBold,
+                    FontWeight = rail ? FontWeight.Medium : FontWeight.SemiBold,
+                    FontSize = rail ? 9.5 : 14,
+                    TextAlignment = rail ? TextAlignment.Center : TextAlignment.Left,
+                    HorizontalAlignment = rail ? HorizontalAlignment.Stretch : HorizontalAlignment.Left,
+                    MaxWidth = rail ? 76 : double.PositiveInfinity,
+                    TextTrimming = TextTrimming.CharacterEllipsis,
                     VerticalAlignment = VerticalAlignment.Center
                 }
             }
@@ -1496,17 +2789,42 @@ public sealed class MainWindow : Window
     {
         foreach (var item in navButtons)
             ApplyNavButtonStyle(item.Value, string.Equals(screen, item.Key, StringComparison.OrdinalIgnoreCase));
+
+        if (!psTimerAttentionPending || !navButtons.TryGetValue("ps", out var psButton)) return;
+        psButton.Background = Brush("#3b250f");
+        psButton.BorderBrush = Brush("#ff9f1a");
+        psButton.BorderThickness = new Thickness(1);
+        if (psButton.Content is not StackPanel content) return;
+        if (content.Children.OfType<PathIcon>().FirstOrDefault() is { } icon)
+            icon.Foreground = Brush("#ff9f1a");
+        if (content.Children.OfType<TextBlock>().FirstOrDefault() is { } label)
+            label.Foreground = Brush("#ffb347");
     }
 
     private static void ApplyNavButtonStyle(Button button, bool active)
     {
-        button.Background = Brush(active ? "#172b43" : "#111820");
-        button.BorderBrush = button.Background;
+        var theme = UiLabAppearance.CurrentKey;
+        button.Background = theme switch
+        {
+            "semi" or "oled" => active ? Brush("#182231") : Brushes.Transparent,
+            "suki" => active ? SoftAccent : Brushes.Transparent,
+            "material" => active ? SoftAccent : Brushes.Transparent,
+            "violet" => active ? DeepAccent : Brushes.Transparent,
+            _ => Brush(active ? "#172b43" : "#111820")
+        };
+        button.BorderBrush = active ? BrightAccent : Brushes.Transparent;
+        button.BorderThickness = theme switch
+        {
+            "semi" or "oled" when active => new Thickness(0, 0, 0, 2),
+            "material" when active => new Thickness(3, 0, 0, 0),
+            "suki" when active => new Thickness(1),
+            _ => new Thickness(0)
+        };
         if (button.Content is not StackPanel content) return;
         if (content.Children.OfType<PathIcon>().FirstOrDefault() is { } icon)
-            icon.Foreground = Brush(active ? "#2f8cff" : "#cbd3df");
+            icon.Foreground = active ? BrightAccent : Brush("#cbd3df");
         if (content.Children.OfType<TextBlock>().FirstOrDefault() is { } label)
-            label.Foreground = Brush(active ? "#4ea1ff" : "#f5f7ff");
+            label.Foreground = active ? BrightAccent : Brush("#f5f7ff");
     }
 
     private Button SideButton(string icon, string text, Action action)
@@ -1748,7 +3066,7 @@ public sealed class MainWindow : Window
         Grid.SetRow(webView, 1);
         Grid.SetRow(footer, 2);
 
-        var dialog = new Window
+        var dialog = new ModalWindow
         {
             Title = "Создание клиента",
             Width = 1180,
@@ -1845,6 +3163,8 @@ public sealed class MainWindow : Window
         }
 
         selected = record;
+        selectedHostKeys.Clear();
+        selectedHostKeys.Add(record.Name);
         if (addPcBox != null) addPcBox.Text = "";
         RefreshMap();
         UpdateSelectedPanel();
@@ -1938,6 +3258,13 @@ public sealed class MainWindow : Window
             selected = null;
         }
 
+        if (target == "shop" && screen != "shop")
+            PrepareShopEntry();
+
+        if (target == "ps")
+            psTimerAttentionPending = false;
+
+        contentHost.IsTransitionReversed = ScreenIndex(target) < ScreenIndex(screen);
         screen = target;
         UpdateNavButtonStyles();
         title.Text = target switch
@@ -1957,8 +3284,7 @@ public sealed class MainWindow : Window
         var fullWidth = target == "dashboard" || target == "shop" || target == "ps" || target == "bookings" || target == "payments" || target == "clients" || target == "logs" || target == "cleaning-log" || target == "details";
         sidePanel.IsVisible = !fullWidth;
         Grid.SetColumnSpan(contentHost, fullWidth ? 2 : 1);
-        contentHost.Margin = fullWidth ? new Thickness(28, 24, 28, 24) : new Thickness(28, 24, 24, 24);
-        contentHost.Content = null;
+        contentHost.Margin = ContentMargin(fullWidth);
         contentHost.Content = target switch
         {
             "dashboard" => BuildDashboardView(),
@@ -1974,15 +3300,45 @@ public sealed class MainWindow : Window
         };
     }
 
+    private static int ScreenIndex(string target)
+    {
+        return target switch
+        {
+            "dashboard" => 0,
+            "details" => 1,
+            "map" => 2,
+            "bookings" => 3,
+            "shop" => 4,
+            "payments" => 5,
+            "clients" => 6,
+            "logs" => 7,
+            "cleaning-log" => 8,
+            "ps" => 9,
+            _ => 0
+        };
+    }
+
     private Control BuildMapView()
     {
-        mapScrollView ??= new ScrollViewer
+        if (mapScrollView == null)
         {
-            Content = mapCanvas,
-            Background = Brush("#080d12"),
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto
-        };
+            mapScrollView = new ScrollViewer
+            {
+                Content = mapCanvas,
+                Background = UiLabAppearance.HasDragonMotif ? Brushes.Transparent : Brush("#080d12"),
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+            };
+            mapScrollView.SizeChanged += (_, e) =>
+            {
+                var width = Math.Max(960, e.NewSize.Width);
+                var height = Math.Max(700, e.NewSize.Height);
+                if (Math.Abs(mapCanvas.Width - width) < 0.5 && Math.Abs(mapCanvas.Height - height) < 0.5) return;
+                mapCanvas.Width = width;
+                mapCanvas.Height = height;
+                if (screen == "map") RefreshMap();
+            };
+        }
 
         return mapScrollView;
     }
@@ -1995,7 +3351,7 @@ public sealed class MainWindow : Window
         return new ScrollViewer
         {
             Content = dashboardBody,
-            Background = Brush("#080d12"),
+            Background = PageBackground(),
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto
         };
@@ -2109,7 +3465,7 @@ public sealed class MainWindow : Window
             Children =
             {
                 avatar,
-                new TextBlock { Text = snapshot.WorkerName, Foreground = Brush("#f5f7ff"), FontSize = 16, FontWeight = FontWeight.SemiBold, HorizontalAlignment = HorizontalAlignment.Center },
+                new TextBlock { Text = ShortOperatorName(snapshot.WorkerName), Foreground = Brush("#f5f7ff"), FontSize = 16, FontWeight = FontWeight.SemiBold, HorizontalAlignment = HorizontalAlignment.Center },
                 new TextBlock { Text = string.IsNullOrWhiteSpace(snapshot.WorkerPhone) ? "—" : snapshot.WorkerPhone, Foreground = Brush("#8f9aad"), FontSize = 14, HorizontalAlignment = HorizontalAlignment.Center },
                 new Separator { Background = Brush("#343d48"), Margin = new Thickness(8, 7) },
                 shiftBadge
@@ -2514,7 +3870,7 @@ public sealed class MainWindow : Window
 
     private PathIcon DashboardIcon(string icon, string color, double size)
     {
-        var data = icon switch
+        var data = ThemedIconData(icon) ?? icon switch
         {
             "dashboard" => "M3,10.5 L12,3 L21,10.5 V21 H14 V15 H10 V21 H3 Z",
             "map" => "M3,4 H21 V6 H3 Z M4,9 H7 V12 H4 Z M10.5,9 H13.5 V12 H10.5 Z M17,9 H20 V12 H17 Z M4,15 H7 V18 H4 Z M10.5,15 H13.5 V18 H10.5 Z M17,15 H20 V18 H17 Z",
@@ -2540,6 +3896,16 @@ public sealed class MainWindow : Window
             "search" => "M10,3 A7,7 0 1 0 10,17 A7,7 0 1 0 10,3 M15,15 L22,22 L20,24 L13,17 Z",
             "calendar" => "M4,4 H7 V2 H9 V4 H15 V2 H17 V4 H20 C21.1,4 22,4.9 22,6 V20 C22,21.1 21.1,22 20,22 H4 C2.9,22 2,21.1 2,20 V6 C2,4.9 2.9,4 4,4 Z M4,9 V20 H20 V9 Z M6,12 H10 V16 H6 Z",
             "event" => "M12,2 A10,10 0 1 0 12,22 A10,10 0 1 0 12,2 M11,6 H13 V13 H11 Z M11,16 H13 V18 H11 Z",
+            "audit" => "M7,3 H9 C9.4,1.8 10.5,1 12,1 C13.5,1 14.6,1.8 15,3 H17 C18.1,3 19,3.9 19,5 V21 H5 V5 C5,3.9 5.9,3 7,3 Z M9,5 H15 V3 H9 Z M8,12 L11,15 L16,9 L17.5,10.5 L11,18 L6.5,13.5 Z",
+            "refresh" => "M12,3 C16.4,3 20,6.6 20,11 H23 L19,16 L15,11 H18 C18,7.7 15.3,5 12,5 C9.4,5 7.2,6.7 6.4,9 L4.3,9 C5.2,5.5 8.3,3 12,3 M6,13 C6,16.3 8.7,19 12,19 C14.6,19 16.8,17.3 17.6,15 H19.7 C18.8,18.5 15.7,21 12,21 C7.6,21 4,17.4 4,13 H1 L5,8 L9,13 Z",
+            "external" => "M5,4 H11 V6 H7 V18 H19 V14 H21 V20 H5 Z M13,3 H22 V12 H20 V6.4 L11.7,14.7 L10.3,13.3 L18.6,5 H13 Z",
+            "settings" => "M10.8,2 H13.2 L14,5 C14.8,5.3 15.5,5.7 16.2,6.2 L19.1,5.3 L20.3,7.4 L18.1,9.5 C18.2,10 18.3,10.5 18.3,11 C18.3,11.5 18.2,12 18.1,12.5 L20.3,14.6 L19.1,16.7 L16.2,15.8 C15.5,16.3 14.8,16.7 14,17 L13.2,20 H10.8 L10,17 C9.2,16.7 8.5,16.3 7.8,15.8 L4.9,16.7 L3.7,14.6 L5.9,12.5 C5.8,12 5.7,11.5 5.7,11 C5.7,10.5 5.8,10 5.9,9.5 L3.7,7.4 L4.9,5.3 L7.8,6.2 C8.5,5.7 9.2,5.3 10,5 Z M12,8 A3,3 0 1 0 12,14 A3,3 0 1 0 12,8",
+            "add" => "M11,3 H13 V11 H21 V13 H13 V21 H11 V13 H3 V11 H11 Z",
+            "edit" => "M4,17.25 V21 H7.75 L18.81,9.94 L15.06,6.19 Z M20.71,8.04 C21.1,7.65 21.1,7 20.71,6.63 L18.37,4.29 C18,3.9 17.35,3.9 16.96,4.29 L15.13,6.12 L18.88,9.87 Z",
+            "clear" => "M8,3 H16 L18,6 H21 V8 H3 V6 H6 Z M5,10 H19 L18,22 H6 Z M9,12 V19 H11 V12 Z M13,12 V19 H15 V12 Z",
+            "dragon" => "M2,20 C4,14 5,9 10,6 L7,2 C12,3 16,5 18,8 L22,6 L20,12 C22,15 20,20 17,22 L14,18 L11,22 C8,19 6,17 2,20 Z M8,10 L12,7 L16,10 L13,13 H10 Z",
+            "spider" => "M12,2 C10.3,2 9,3.3 9,5 C9,5.8 9.3,6.5 9.8,7 C8.7,8.2 8,10 8,12 C8,16.2 9.8,19.4 12,22 C14.2,19.4 16,16.2 16,12 C16,10 15.3,8.2 14.2,7 C14.7,6.5 15,5.8 15,5 C15,3.3 13.7,2 12,2 Z M8.5,8.5 L3,4 L2,5.5 L7.2,11 Z M7.8,11.5 L1,9.5 L1,11.5 L7.8,14 Z M8.5,14.5 L3,20 L2,18.5 L7.2,12.8 Z M15.5,8.5 L21,4 L22,5.5 L16.8,11 Z M16.2,11.5 L23,9.5 L23,11.5 L16.2,14 Z M15.5,14.5 L21,20 L22,18.5 L16.8,12.8 Z",
+            "cat" => "M4,9 L5,2 L10,6 C11.3,5.6 12.7,5.6 14,6 L19,2 L20,9 C21.4,10.5 22,12.3 22,14.5 C22,19 18,22 12,22 C6,22 2,19 2,14.5 C2,12.3 2.6,10.5 4,9 Z M7,12 L10,13.5 L7,15 Z M17,12 L14,13.5 L17,15 Z M10,17 H14 L12,19 Z",
             _ => "M4,4 H20 V20 H4 Z"
         };
         return new PathIcon
@@ -2549,6 +3915,55 @@ public sealed class MainWindow : Window
             Width = size,
             Height = size,
             VerticalAlignment = VerticalAlignment.Center
+        };
+    }
+
+    private static string? ThemedIconData(string icon)
+    {
+        return UiLabAppearance.CurrentKey switch
+        {
+            "material" => icon switch
+            {
+                "dashboard" => "M3,3 H10 V10 H3 Z M14,3 H21 V10 H14 Z M3,14 H10 V21 H3 Z M14,14 H21 V21 H14 Z",
+                "map" => "M4,3 H20 C21.1,3 22,3.9 22,5 V19 C22,20.1 21.1,21 20,21 H4 C2.9,21 2,20.1 2,19 V5 C2,3.9 2.9,3 4,3 Z M5,7 H9 V11 H5 Z M10,7 H14 V11 H10 Z M15,7 H19 V11 H15 Z M5,13 H9 V17 H5 Z M10,13 H14 V17 H10 Z M15,13 H19 V17 H15 Z",
+                "calendar" => "M5,2 H7 V5 H17 V2 H19 V5 H21 V22 H3 V5 H5 Z M5,9 V20 H19 V9 Z",
+                "goods" => "M5,7 H19 L20,22 H4 Z M8,7 C8,4.8 9.8,3 12,3 C14.2,3 16,4.8 16,7 H14 C14,5.9 13.1,5 12,5 C10.9,5 10,5.9 10,7 Z",
+                "payments" => "M3,5 H21 C22.1,5 23,5.9 23,7 V17 C23,18.1 22.1,19 21,19 H3 C1.9,19 1,18.1 1,17 V7 C1,5.9 1.9,5 3,5 Z M3,9 H21 V12 H3 Z",
+                "clients" => "M8,4 A4,4 0 1 0 8,12 A4,4 0 1 0 8,4 M16,6 A3,3 0 1 0 16,12 A3,3 0 1 0 16,6 M1,21 C1,16.6 4.1,14 8,14 C11.9,14 15,16.6 15,21 Z M15,14 C19,14 23,16.1 23,20 H17 C17,17.8 16.3,15.8 15,14 Z",
+                "logs" => "M5,3 H19 C20.1,3 21,3.9 21,5 V21 H3 V5 C3,3.9 3.9,3 5,3 Z M7,7 H17 V9 H7 Z M7,11 H17 V13 H7 Z M7,15 H14 V17 H7 Z",
+                "audit" => "M8,2 H16 V4 H20 V22 H4 V4 H8 Z M10,4 V6 H14 V4 Z M8,13 L11,16 L17,9 L18.5,10.5 L11,19 L6.5,14.5 Z",
+                "gamepad" => "M7,7 H17 C20,7 22,10 22,15 C22,18 20.3,20 18.2,20 C16,20 15.4,17 12,17 C8.6,17 8,20 5.8,20 C3.7,20 2,18 2,15 C2,10 4,7 7,7 Z M7,10 V12 H5 V14 H7 V16 H9 V14 H11 V12 H9 V10 Z",
+                _ => null
+            },
+            "semi" => icon switch
+            {
+                "dashboard" => "M3,4 H21 V7 H3 Z M3,10 H14 V13 H3 Z M3,16 H18 V19 H3 Z",
+                "map" => "M3,4 H9 V10 H3 Z M11,4 H21 V10 H11 Z M3,12 H14 V20 H3 Z M16,12 H21 V20 H16 Z",
+                "calendar" => "M4,5 H20 V21 H4 Z M7,2 H9 V7 H7 Z M15,2 H17 V7 H15 Z M6,10 H18 V12 H6 Z",
+                "goods" => "M4,7 H20 V21 H4 Z M8,7 C8,4.8 9.8,3 12,3 C14.2,3 16,4.8 16,7 H14 C14,5.9 13.1,5 12,5 C10.9,5 10,5.9 10,7 Z",
+                "payments" => "M3,5 H21 V19 H3 Z M3,8 H21 V10 H3 Z M6,14 H12 V16 H6 Z",
+                "clients" => "M7,4 H11 V8 H7 Z M14,4 H18 V8 H14 Z M4,11 H14 V20 H4 Z M15,11 H21 V20 H15 Z",
+                "logs" => "M3,4 H6 V7 H3 Z M8,4 H21 V7 H8 Z M3,10 H6 V13 H3 Z M8,10 H21 V13 H8 Z M3,16 H6 V19 H3 Z M8,16 H21 V19 H8 Z",
+                _ => null
+            },
+            "suki" => icon switch
+            {
+                "dashboard" => "M2,3 H11 V12 H2 Z M13,3 H22 V8 H13 Z M13,10 H22 V21 H13 Z M2,14 H11 V21 H2 Z",
+                "map" => "M2,4 L8,2 L16,5 L22,3 V20 L16,22 L8,19 L2,21 Z M8,5 V16 L16,19 V8 Z",
+                "calendar" => "M3,5 H21 V22 H3 Z M6,2 H9 V8 H6 Z M15,2 H18 V8 H15 Z M6,11 H11 V16 H6 Z",
+                "goods" => "M3,8 L6,3 H18 L21,8 V21 H3 Z M8,8 C8,5.8 9.8,4 12,4 C14.2,4 16,5.8 16,8 H14 C14,6.9 13.1,6 12,6 C10.9,6 10,6.9 10,8 Z",
+                "clients" => "M12,2 L21,7 V17 L12,22 L3,17 V7 Z M12,6 A3,3 0 1 0 12,12 A3,3 0 1 0 12,6 M7,18 C7.5,14.8 9.2,13 12,13 C14.8,13 16.5,14.8 17,18 Z",
+                "logs" => "M3,3 H21 V8 H3 Z M3,10 H16 V15 H3 Z M3,17 H19 V22 H3 Z",
+                _ => null
+            },
+            "oled" => icon switch
+            {
+                "dashboard" => "M2,11 H11 V2 H2 Z M13,2 H22 V11 H13 Z M2,13 H11 V22 H2 Z M13,13 H22 V22 H13 Z",
+                "map" => "M2,3 H22 V6 H2 Z M2,9 H22 V12 H2 Z M2,15 H22 V18 H2 Z",
+                "logs" => "M4,3 H20 V5 H4 Z M4,9 H20 V11 H4 Z M4,15 H20 V17 H4 Z M4,21 H14 V23 H4 Z",
+                _ => null
+            },
+            _ => null
         };
     }
 
@@ -2575,7 +3990,7 @@ public sealed class MainWindow : Window
     {
         return new Border
         {
-            Background = Brush("#151c24"),
+            Background = PanelBrush("#151c25", 188),
             BorderBrush = Brush("#18212b"),
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(8),
@@ -2611,6 +4026,14 @@ public sealed class MainWindow : Window
             .Replace('\u00a0', ' ') + " ₽";
     }
 
+    private static string ShortOperatorName(string? fullName)
+    {
+        var parts = (fullName ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length < 2) return string.IsNullOrWhiteSpace(fullName) ? "—" : fullName.Trim();
+        var initials = parts.Skip(1).Take(2).Select(x => char.ToUpperInvariant(x[0]) + ".");
+        return parts[0] + " " + string.Join(" ", initials);
+    }
+
     private static string DashboardPercentText(decimal value)
     {
         return value.ToString("0.##", System.Globalization.CultureInfo.GetCultureInfo("ru-RU")) + "%";
@@ -2643,7 +4066,7 @@ public sealed class MainWindow : Window
         var scroll = new ScrollViewer
         {
             Content = computerGroupsHost,
-            Background = Brush("#080d12"),
+            Background = PageBackground(),
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto
         };
@@ -2662,7 +4085,7 @@ public sealed class MainWindow : Window
 
         var root = new Grid
         {
-            Background = Brush("#080d12"),
+            Background = PageBackground(),
             RowDefinitions = new RowDefinitions("Auto,*")
         };
         root.Children.Add(infoButton);
@@ -2709,7 +4132,7 @@ public sealed class MainWindow : Window
             VerticalAlignment = VerticalAlignment.Bottom,
             Margin = new Thickness(0, 0, 0, 18),
             Padding = new Thickness(16, 10),
-            Background = Brush("#101722"),
+            Background = PanelBrush("#101722", 214),
             BorderBrush = Brush("#2b3550"),
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(8),
@@ -2844,7 +4267,7 @@ public sealed class MainWindow : Window
 
         return new Border
         {
-            Background = Brush("#121a24"),
+            Background = PanelBrush("#121a24", 188),
             CornerRadius = new CornerRadius(8),
             ClipToBounds = true,
             Child = new StackPanel { Children = { groupHeader, rows } }
@@ -2855,7 +4278,7 @@ public sealed class MainWindow : Window
     {
         var grid = ComputerTableGrid();
         grid.Height = 58;
-        grid.Background = Brush("#121a24");
+        grid.Background = PanelBrush("#121a24", 200);
         AddComputerCell(grid, new Border(), 0);
         AddComputerCell(grid, ComputerSortHeader("Название", "name"), 1);
         AddComputerCell(grid, ComputerSortHeader("Статус", "status"), 2);
@@ -2933,7 +4356,7 @@ public sealed class MainWindow : Window
 
         var row = new Border
         {
-            Background = selectedRow ? Brush("#1d3b63") : Brush("#151d28"),
+            Background = selectedRow ? Brush("#1d3b63") : PanelBrush("#151d28", 214),
             BorderBrush = Brush("#263244"),
             BorderThickness = new Thickness(0, 1, 0, 0),
             Child = grid,
@@ -3499,7 +4922,7 @@ public sealed class MainWindow : Window
             return new Border
             {
                 Height = 54,
-                Background = Brush("#151d28"),
+                Background = PanelBrush("#151d28", 200),
                 BorderBrush = Brush("#343d48"),
                 BorderThickness = new Thickness(0, 0, 0, 1),
                 Padding = new Thickness(18, 0),
@@ -3549,7 +4972,7 @@ public sealed class MainWindow : Window
                 rows.Children.Add(new Border
                 {
                     MinHeight = 72,
-                    Background = Brush("#151d28"),
+                    Background = PanelBrush("#151d28", 214),
                     Padding = new Thickness(18, 12),
                     Child = grid
                 });
@@ -3658,7 +5081,7 @@ public sealed class MainWindow : Window
         var table = new Border
         {
             Margin = new Thickness(0, 18, 0, 0),
-            Background = Brush("#151d28"),
+            Background = PanelBrush("#151d28", 178),
             CornerRadius = new CornerRadius(8),
             ClipToBounds = true,
             Child = rows
@@ -3679,7 +5102,7 @@ public sealed class MainWindow : Window
         return new ScrollViewer
         {
             Content = content,
-            Background = Brush("#080d12"),
+            Background = PageBackground(),
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto
         };
@@ -3688,6 +5111,7 @@ public sealed class MainWindow : Window
     private Control BuildCleaningAuditView()
     {
         const int pageSize = 50;
+        var canEdit = CanEditCleaningAudit();
         var currentPage = 1;
         var search = new TextBox
         {
@@ -3699,6 +5123,49 @@ public sealed class MainWindow : Window
             BorderBrush = Brush("#263244"),
             Padding = new Thickness(14, 0)
         };
+        ComboBox AuditFilter(IEnumerable<string> items, double width)
+        {
+            return new ComboBox
+            {
+                Width = width,
+                Height = 44,
+                ItemsSource = items.ToList(),
+                SelectedIndex = 0,
+                Background = Brush("#151d28"),
+                Foreground = Brush("#f5f7ff"),
+                BorderBrush = Brush("#263244"),
+                Padding = new Thickness(12, 0)
+            };
+        }
+
+        var operatorItems = new[] { "Все операторы" }
+            .Concat(cleaningAuditEntries
+                .Select(x => string.IsNullOrWhiteSpace(x.Operator) ? "Оператор не определён" : x.Operator)
+                .Distinct(StringComparer.CurrentCultureIgnoreCase)
+                .OrderBy(x => x))
+            .ToList();
+        var dateItems = new[] { "Все даты" }
+            .Concat(cleaningAuditEntries
+                .Select(x => x.ClientLeftAtUtc.ToLocalTime().ToString("dd.MM.yyyy"))
+                .Distinct()
+                .OrderByDescending(x => DateTime.ParseExact(x, "dd.MM.yyyy", System.Globalization.CultureInfo.InvariantCulture)))
+            .ToList();
+        var operatorFilter = AuditFilter(operatorItems, 230);
+        var dateFilter = AuditFilter(dateItems, 170);
+        var kindFilter = AuditFilter(new[]
+        {
+            "Все уборки",
+            "Только просроченные",
+            "Только подозрительные",
+            "Просроченные или подозрительные"
+        }, 260);
+        var sortFilter = AuditFilter(new[]
+        {
+            "Сначала новые",
+            "Сначала старые",
+            "По оператору",
+            "Долгая уборка сначала"
+        }, 230);
         var summaryText = new TextBlock { Foreground = Brush("#8f9aad"), VerticalAlignment = VerticalAlignment.Center };
         var rows = new StackPanel { Spacing = 1 };
         var pager = new StackPanel
@@ -3711,9 +5178,11 @@ public sealed class MainWindow : Window
 
         Grid AuditGrid() => new()
         {
-            ColumnDefinitions = new ColumnDefinitions("130,210,210,150,*"),
+            ColumnDefinitions = new ColumnDefinitions(canEdit
+                ? "110,190,190,160,260,*,92"
+                : "110,190,190,160,260,*"),
             ColumnSpacing = 16,
-            MinWidth = 1050
+            MinWidth = canEdit ? 1320 : 1210
         };
 
         static void AddCell(Grid grid, Control cell, int column)
@@ -3736,11 +5205,13 @@ public sealed class MainWindow : Window
         AddCell(header, Cell("ПК", "#cbd3df", true), 0);
         AddCell(header, Cell("Клиент ушёл", "#cbd3df", true), 1);
         AddCell(header, Cell("ПК убран", "#cbd3df", true), 2);
-        AddCell(header, Cell("Просрочка сверх 20 мин", "#cbd3df", true), 3);
-        AddCell(header, Cell("Оператор смены", "#cbd3df", true), 4);
+        AddCell(header, Cell("Время уборки", "#cbd3df", true), 3);
+        AddCell(header, Cell("Контроль", "#cbd3df", true), 4);
+        AddCell(header, Cell("Оператор смены", "#cbd3df", true), 5);
+        if (canEdit) AddCell(header, Cell("", "#cbd3df", true), 6);
         rows.Children.Add(new Border
         {
-            Background = Brush("#111820"),
+            Background = PanelBrush("#111820", 200),
             Padding = new Thickness(18, 14),
             Child = header
         });
@@ -3748,12 +5219,39 @@ public sealed class MainWindow : Window
         List<CleaningAuditEntry> FilteredEntries()
         {
             var query = (search.Text ?? "").Trim();
-            return cleaningAuditEntries
+            var selectedOperator = operatorFilter.SelectedItem as string ?? "Все операторы";
+            var selectedDate = dateFilter.SelectedItem as string ?? "Все даты";
+            var filtered = cleaningAuditEntries
                 .Where(x => query.Length == 0
                     || x.HostName.Contains(query, StringComparison.CurrentCultureIgnoreCase)
-                    || x.Operator.Contains(query, StringComparison.CurrentCultureIgnoreCase))
-                .OrderByDescending(x => x.CleanedAtUtc ?? x.ClientLeftAtUtc.AddMinutes(20))
-                .ToList();
+                    || (x.Operator ?? "").Contains(query, StringComparison.CurrentCultureIgnoreCase)
+                    || (x.SuspiciousReason ?? "").Contains(query, StringComparison.CurrentCultureIgnoreCase))
+                .Where(x => selectedOperator == "Все операторы"
+                    || string.Equals(string.IsNullOrWhiteSpace(x.Operator) ? "Оператор не определён" : x.Operator,
+                        selectedOperator, StringComparison.CurrentCultureIgnoreCase))
+                .Where(x => selectedDate == "Все даты"
+                    || x.ClientLeftAtUtc.ToLocalTime().ToString("dd.MM.yyyy") == selectedDate)
+                .Where(x =>
+                {
+                    var duration = (x.CleanedAtUtc ?? DateTime.UtcNow) - x.ClientLeftAtUtc;
+                    var overdue = duration > TimeSpan.FromMinutes(20);
+                    var suspicious = !string.IsNullOrWhiteSpace(x.SuspiciousReason);
+                    return kindFilter.SelectedIndex switch
+                    {
+                        1 => overdue,
+                        2 => suspicious,
+                        3 => overdue || suspicious,
+                        _ => true
+                    };
+                });
+
+            return sortFilter.SelectedIndex switch
+            {
+                1 => filtered.OrderBy(x => x.CleanedAtUtc ?? x.ClientLeftAtUtc).ToList(),
+                2 => filtered.OrderBy(x => x.Operator ?? "").ThenByDescending(x => x.CleanedAtUtc ?? x.ClientLeftAtUtc).ToList(),
+                3 => filtered.OrderByDescending(x => (x.CleanedAtUtc ?? DateTime.UtcNow) - x.ClientLeftAtUtc).ToList(),
+                _ => filtered.OrderByDescending(x => x.CleanedAtUtc ?? x.ClientLeftAtUtc).ToList()
+            };
         }
 
         void Render()
@@ -3765,29 +5263,83 @@ public sealed class MainWindow : Window
             currentPage = Math.Clamp(currentPage, 1, pages);
             foreach (var entry in filtered.Skip((currentPage - 1) * pageSize).Take(pageSize))
             {
-                var delay = (entry.CleanedAtUtc ?? DateTime.UtcNow) - entry.ClientLeftAtUtc - TimeSpan.FromMinutes(20);
-                if (delay < TimeSpan.Zero) delay = TimeSpan.Zero;
+                var cleaningTime = (entry.CleanedAtUtc ?? DateTime.UtcNow) - entry.ClientLeftAtUtc;
+                if (cleaningTime < TimeSpan.Zero) cleaningTime = TimeSpan.Zero;
+                var overdue = cleaningTime - TimeSpan.FromMinutes(20);
+                var timingText = entry.CleanedAtUtc.HasValue
+                    ? overdue > TimeSpan.Zero
+                        ? "Просрочка +" + FormatCleaningDelay(overdue)
+                        : "Убрано за " + FormatCleaningDelay(cleaningTime)
+                    : overdue > TimeSpan.Zero
+                        ? "Просрочено на " + FormatCleaningDelay(overdue)
+                        : "Ожидает " + FormatCleaningDelay(cleaningTime);
                 var grid = AuditGrid();
                 AddCell(grid, Cell(entry.HostName, "#4ea1ff", true), 0);
                 AddCell(grid, Cell(entry.ClientLeftAtUtc.ToLocalTime().ToString("dd.MM.yyyy HH:mm:ss"), "#cbd3df"), 1);
                 AddCell(grid, Cell(entry.CleanedAtUtc.HasValue
                     ? entry.CleanedAtUtc.Value.ToLocalTime().ToString("dd.MM.yyyy HH:mm:ss")
                     : "Ожидает уборки", entry.CleanedAtUtc.HasValue ? "#cbd3df" : "#ff5c66", true), 2);
-                AddCell(grid, Cell(FormatCleaningDelay(delay), entry.CleanedAtUtc.HasValue ? "#ffb547" : "#ff5c66", true), 3);
-                AddCell(grid, Cell(string.IsNullOrWhiteSpace(entry.Operator) ? "Оператор не определён" : entry.Operator), 4);
+                AddCell(grid, Cell(timingText, overdue > TimeSpan.Zero ? "#ff5c66" : "#cbd3df", true), 3);
+                AddCell(grid, Cell(string.IsNullOrWhiteSpace(entry.SuspiciousReason)
+                    ? "—"
+                    : "Подозрительно: " + entry.SuspiciousReason,
+                    string.IsNullOrWhiteSpace(entry.SuspiciousReason) ? "#667085" : "#ffb547", true), 4);
+                AddCell(grid, Cell(string.IsNullOrWhiteSpace(entry.Operator) ? "Оператор не определён" : entry.Operator), 5);
+                if (canEdit)
+                {
+                    var editButton = new Button
+                    {
+                        Width = 38,
+                        Height = 38,
+                        Padding = new Thickness(0),
+                        Background = Brushes.Transparent,
+                        BorderBrush = Brush("#315d89"),
+                        Content = DashboardIcon("edit", "#4ea1ff", 16)
+                    };
+                    ToolTip.SetTip(editButton, "Редактировать запись");
+                    editButton.Click += async (_, _) =>
+                    {
+                        if (!CanEditCleaningAudit()) return;
+                        if (await ShowCleaningAuditEditDialogAsync(entry))
+                            Render();
+                    };
+                    var deleteButton = new Button
+                    {
+                        Width = 38,
+                        Height = 38,
+                        Padding = new Thickness(0),
+                        Background = Brushes.Transparent,
+                        BorderBrush = Brush("#6d2832"),
+                        Content = DashboardIcon("clear", "#ff5c66", 16)
+                    };
+                    ToolTip.SetTip(deleteButton, "Удалить запись");
+                    deleteButton.Click += (_, _) =>
+                    {
+                        if (!CanEditCleaningAudit()) return;
+                        DeleteCleaningAuditEntry(entry);
+                        Render();
+                    };
+                    AddCell(grid, new StackPanel
+                    {
+                        Orientation = Orientation.Horizontal,
+                        Spacing = 6,
+                        Children = { editButton, deleteButton }
+                    }, 6);
+                }
                 rows.Children.Add(new Border
                 {
-                    Background = Brush("#151d28"),
+                    Background = PanelBrush("#151d28", 214),
                     Padding = new Thickness(18, 14),
                     Child = grid
                 });
             }
 
             if (filtered.Count == 0)
-                rows.Children.Add(DashboardEmpty("Просроченных уборок за последние 31 день нет"));
+                rows.Children.Add(DashboardEmpty("Уборок за последние 31 день нет"));
 
-            summaryText.Text = "Записей за 31 день: " + cleaningAuditEntries.Count
+            summaryText.Text = "Показано: " + filtered.Count + " из " + cleaningAuditEntries.Count
                 + " · ожидают уборки: " + pendingCleaningAudits.Count
+                + " · подозрительных: " + cleaningAuditEntries.Count(x => !string.IsNullOrWhiteSpace(x.SuspiciousReason))
                 + " · просрочено сейчас: " + pendingCleaningAudits.Values.Count(x => DateTime.UtcNow - x.ClientLeftAtUtc > TimeSpan.FromMinutes(20));
 
             if (pages <= 1) return;
@@ -3810,17 +5362,28 @@ public sealed class MainWindow : Window
         }
 
         search.TextChanged += (_, _) => { currentPage = 1; Render(); };
-        var top = new Grid
+        operatorFilter.SelectionChanged += (_, _) => { currentPage = 1; Render(); };
+        dateFilter.SelectionChanged += (_, _) => { currentPage = 1; Render(); };
+        kindFilter.SelectionChanged += (_, _) => { currentPage = 1; Render(); };
+        sortFilter.SelectionChanged += (_, _) => { currentPage = 1; Render(); };
+        var searchRow = new Grid
         {
             ColumnDefinitions = new ColumnDefinitions("Auto,*"),
             ColumnSpacing = 18,
             Children = { search, summaryText }
         };
         Grid.SetColumn(summaryText, 1);
+        var filtersRow = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 10,
+            Children = { operatorFilter, dateFilter, kindFilter, sortFilter }
+        };
+        var top = new StackPanel { Spacing = 10, Children = { searchRow, filtersRow } };
         var table = new Border
         {
             Margin = new Thickness(0, 18, 0, 0),
-            Background = Brush("#151d28"),
+            Background = PanelBrush("#151d28", 178),
             CornerRadius = new CornerRadius(8),
             ClipToBounds = true,
             Child = rows
@@ -3836,11 +5399,175 @@ public sealed class MainWindow : Window
         Render();
         return new ScrollViewer
         {
-            Background = Brush("#080d12"),
+            Background = PageBackground(),
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             Content = new StackPanel { Children = { top, table, pager, fileText } }
         };
+    }
+
+    private async Task<bool> ShowCleaningAuditEditDialogAsync(CleaningAuditEntry entry)
+    {
+        var dialog = new ModalWindow
+        {
+            Title = "Редактирование уборки",
+            Width = 620,
+            Height = 650,
+            MinWidth = 520,
+            MinHeight = 560,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Background = Brush("#0b1118")
+        };
+        TextBox Field(string text, string watermark) => new()
+        {
+            Text = text,
+            Watermark = watermark,
+            Height = 42,
+            Background = Brush("#182231"),
+            Foreground = Brush("#f5f7ff"),
+            BorderBrush = Brush("#2b3550")
+        };
+        TextBlock Caption(string text) => new()
+        {
+            Text = text,
+            Foreground = Brush("#8f9aad"),
+            FontSize = 12,
+            FontWeight = FontWeight.SemiBold
+        };
+
+        var hostBox = Field(entry.HostName, "ПК");
+        var operatorBox = Field(entry.Operator, "Оператор смены");
+        var leftBox = Field(entry.ClientLeftAtUtc.ToLocalTime().ToString("dd.MM.yyyy HH:mm:ss"), "дд.мм.гггг чч:мм:сс");
+        var cleanedBox = Field(entry.CleanedAtUtc?.ToLocalTime().ToString("dd.MM.yyyy HH:mm:ss") ?? "", "Оставьте пустым, если уборка ожидается");
+        var reasonBox = Field(entry.SuspiciousReason, "Причина отметки");
+        var error = new TextBlock { Foreground = Brush("#ffb547"), TextWrapping = TextWrapping.Wrap };
+        var save = AccentButton("Сохранить", () => { });
+        var cancel = GhostButton("Отмена", () => dialog.Close(false));
+
+        static bool TryLocalDate(string value, out DateTime utc)
+        {
+            if (DateTime.TryParse(value, System.Globalization.CultureInfo.CurrentCulture,
+                    System.Globalization.DateTimeStyles.AllowWhiteSpaces, out var local))
+            {
+                utc = DateTime.SpecifyKind(local, DateTimeKind.Local).ToUniversalTime();
+                return true;
+            }
+            utc = default;
+            return false;
+        }
+
+        save.Click += (_, _) =>
+        {
+            var hostName = NormalizeName(hostBox.Text ?? "");
+            if (string.IsNullOrWhiteSpace(hostName) || !TryLocalDate(leftBox.Text ?? "", out var leftUtc))
+            {
+                error.Text = "Укажите ПК и корректное время ухода клиента.";
+                return;
+            }
+            DateTime? cleanedUtc = null;
+            if (!string.IsNullOrWhiteSpace(cleanedBox.Text))
+            {
+                if (!TryLocalDate(cleanedBox.Text, out var parsedCleaned) || parsedCleaned < leftUtc)
+                {
+                    error.Text = "Время уборки должно быть корректным и не раньше ухода клиента.";
+                    return;
+                }
+                cleanedUtc = parsedCleaned;
+            }
+
+            var oldHost = entry.HostName;
+            var oldLeft = entry.ClientLeftAtUtc;
+            var wasPending = TryGetPendingCleaning(oldHost, out var oldPending)
+                && Math.Abs((oldPending.ClientLeftAtUtc - oldLeft).TotalSeconds) < 1;
+            if (wasPending)
+            {
+                RemovePendingCleaning(oldHost);
+                cleaningReminderMinutes.Remove(oldHost);
+                if (records.TryGetValue(oldHost, out var oldRecord))
+                {
+                    oldRecord.CleaningStatus = "Нет задачи";
+                    oldRecord.FreedAtUtc = null;
+                }
+            }
+
+            entry.HostName = hostName;
+            entry.Operator = (operatorBox.Text ?? "").Trim();
+            entry.ClientLeftAtUtc = leftUtc;
+            entry.CleanedAtUtc = cleanedUtc;
+            entry.SuspiciousReason = (reasonBox.Text ?? "").Trim();
+            if (!cleanedUtc.HasValue)
+            {
+                pendingCleaningAudits[hostName] = new PendingCleaningAudit
+                {
+                    HostName = hostName,
+                    Operator = entry.Operator,
+                    ClientLeftAtUtc = leftUtc,
+                    LastReminderAtUtc = entry.LastReminderAtUtc
+                };
+                if (records.TryGetValue(hostName, out var record))
+                {
+                    record.CleaningStatus = "Нужно убрать";
+                    record.FreedAtUtc = leftUtc;
+                }
+            }
+            else if (records.TryGetValue(hostName, out var cleanedRecord) && wasPending)
+            {
+                cleanedRecord.CleaningStatus = "Убрано";
+                cleanedRecord.FreedAtUtc = null;
+            }
+
+            SaveCleaningAuditState();
+            RefreshMap();
+            UpdateSelectedPanel();
+            dialog.Close(true);
+        };
+
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Spacing = 10,
+            Children = { cancel, save }
+        };
+        dialog.Content = new ScrollViewer
+        {
+            Content = new StackPanel
+            {
+                Margin = new Thickness(24),
+                Spacing = 10,
+                Children =
+                {
+                    new TextBlock { Text = "Данные уборки", Foreground = Brush("#f5f7ff"), FontSize = 22, FontWeight = FontWeight.SemiBold },
+                    Caption("Компьютер"), hostBox,
+                    Caption("Оператор смены"), operatorBox,
+                    Caption("Клиент ушёл"), leftBox,
+                    Caption("ПК убран"), cleanedBox,
+                    Caption("Контрольная отметка"), reasonBox,
+                    error,
+                    buttons
+                }
+            }
+        };
+        return await dialog.ShowDialog<bool>(this);
+    }
+
+    private void DeleteCleaningAuditEntry(CleaningAuditEntry entry)
+    {
+        if (TryGetPendingCleaning(entry.HostName, out var pending)
+            && Math.Abs((pending.ClientLeftAtUtc - entry.ClientLeftAtUtc).TotalSeconds) < 1)
+        {
+            RemovePendingCleaning(entry.HostName);
+            cleaningReminderMinutes.Remove(entry.HostName);
+            if (records.TryGetValue(entry.HostName, out var record))
+            {
+                record.CleaningStatus = "Нет задачи";
+                record.FreedAtUtc = null;
+            }
+        }
+        cleaningAuditEntries.Remove(entry);
+        SaveCleaningAuditState();
+        RefreshMap();
+        UpdateSelectedPanel();
     }
 
     private static string FormatCleaningDelay(TimeSpan delay)
@@ -3848,6 +5575,22 @@ public sealed class MainWindow : Window
         if (delay.TotalHours >= 1)
             return ((int)delay.TotalHours) + " ч " + delay.Minutes.ToString("00") + " мин";
         return ((int)delay.TotalMinutes) + " мин " + delay.Seconds.ToString("00") + " сек";
+    }
+
+    private static string CleaningSuspicion(DateTime clientLeftAtUtc, DateTime cleanedAtUtc, DateTime? reminderAtUtc)
+    {
+        var afterLeaving = cleanedAtUtc - clientLeftAtUtc;
+        if (afterLeaving >= TimeSpan.Zero && afterLeaving <= TimeSpan.FromSeconds(30))
+            return "убран через " + (int)Math.Round(afterLeaving.TotalSeconds) + " сек. после ухода клиента";
+
+        if (reminderAtUtc.HasValue)
+        {
+            var afterReminder = cleanedAtUtc - reminderAtUtc.Value;
+            if (afterReminder >= TimeSpan.Zero && afterReminder <= TimeSpan.FromSeconds(10))
+                return "убран через " + (int)Math.Round(afterReminder.TotalSeconds) + " сек. после уведомления";
+        }
+
+        return "";
     }
 
     private static string CleaningAuditPath => Path.Combine(
@@ -3866,7 +5609,17 @@ public sealed class MainWindow : Window
             if (document == null) return;
             cleaningAuditEntries.AddRange(document.Entries.Where(x => !string.IsNullOrWhiteSpace(x.HostName)));
             foreach (var pending in document.Pending.Where(x => !string.IsNullOrWhiteSpace(x.HostName)))
+            {
                 pendingCleaningAudits[NormalizeName(pending.HostName)] = pending;
+                if (FindCleaningAuditEntry(pending.HostName, pending.ClientLeftAtUtc) == null)
+                    cleaningAuditEntries.Add(new CleaningAuditEntry
+                    {
+                        Operator = pending.Operator,
+                        HostName = NormalizeName(pending.HostName),
+                        ClientLeftAtUtc = pending.ClientLeftAtUtc,
+                        LastReminderAtUtc = pending.LastReminderAtUtc
+                    });
+            }
             PruneCleaningAuditState();
             SaveCleaningAuditState();
         }
@@ -3909,12 +5662,20 @@ public sealed class MainWindow : Window
     private void SetPendingCleaning(string hostName, DateTime clientLeftAtUtc)
     {
         var normalized = NormalizeName(hostName);
-        pendingCleaningAudits[normalized] = new PendingCleaningAudit
+        var pending = new PendingCleaningAudit
         {
             HostName = normalized,
             Operator = apiAccessInfo?.DisplayName ?? "",
             ClientLeftAtUtc = clientLeftAtUtc
         };
+        pendingCleaningAudits[normalized] = pending;
+        if (FindCleaningAuditEntry(normalized, clientLeftAtUtc) == null)
+            cleaningAuditEntries.Add(new CleaningAuditEntry
+            {
+                Operator = pending.Operator,
+                HostName = normalized,
+                ClientLeftAtUtc = clientLeftAtUtc
+            });
     }
 
     private bool TryGetPendingCleaning(string hostName, out PendingCleaningAudit pending) =>
@@ -3935,8 +5696,44 @@ public sealed class MainWindow : Window
         return digits;
     }
 
+    private static string OperatorPaletteName(ApiAccessInfo info)
+    {
+        var phone = NormalizeOperatorPhone(info.Phone);
+        if (phone == CleaningAuditEditorPhone) return "Родион";
+        if (phone == SonyaOperatorPhone) return "Соня";
+        if (phone == ArtemOperatorPhone) return "Артём";
+        if (phone == KirillOperatorPhone) return "Кирилл";
+
+        var name = (info.DisplayName ?? "").ToLowerInvariant().Replace('ё', 'е');
+        if (name.Contains("внуков") || name.Contains("родион")) return "Родион";
+        if (name.Contains("соколов") || name.Split(' ', StringSplitOptions.RemoveEmptyEntries).Any(x => x.StartsWith("сон") || x.StartsWith("соф"))) return "Соня";
+        if (name.Contains("коваленко") || name.Contains("артем")) return "Артём";
+        if (name.Contains("кирил")) return "Кирилл";
+        return "";
+    }
+
+    private void ApplyOperatorPalette(ApiAccessInfo info)
+    {
+        var phone = NormalizeOperatorPhone(info.Phone);
+        var identity = phone.Length > 0 ? phone : info.DisplayName.Trim().ToLowerInvariant().Replace('ё', 'е');
+        if (identity.Length == 0 || identity == appliedOperatorPaletteIdentity) return;
+        appliedOperatorPaletteIdentity = identity;
+
+        var paletteName = OperatorPaletteName(info);
+        if (paletteName.Length == 0)
+            UiLabAppearance.ResetCustomPalette();
+        else
+            UiLabAppearance.ActivateNamedPalette(paletteName);
+
+        ApplyAppearanceBrushes();
+        RebuildShell();
+    }
+
     private bool CanViewCleaningAudit() =>
         apiAccessInfo != null && CleaningAuditAccessPhones.Contains(NormalizeOperatorPhone(apiAccessInfo.Phone));
+
+    private bool CanEditCleaningAudit() =>
+        apiAccessInfo != null && NormalizeOperatorPhone(apiAccessInfo.Phone) == CleaningAuditEditorPhone;
 
     private void UpdateCleaningAuditAccess()
     {
@@ -3944,6 +5741,8 @@ public sealed class MainWindow : Window
             button.IsVisible = CanViewCleaningAudit();
         if (screen == "cleaning-log" && !CanViewCleaningAudit())
             SwitchScreen("map");
+        else if (screen == "cleaning-log")
+            contentHost.Content = BuildCleaningAuditView();
     }
 
     private async Task RefreshCurrentOperatorAccessAsync()
@@ -3951,6 +5750,7 @@ public sealed class MainWindow : Window
         try
         {
             apiAccessInfo = await service.LoadApiAccessInfoAsync(config, CancellationToken.None);
+            ApplyOperatorPalette(apiAccessInfo);
         }
         catch
         {
@@ -4117,7 +5917,7 @@ public sealed class MainWindow : Window
             Foreground = Brush("#f5f7ff"),
             BorderBrush = Brush("#2f8cff")
         };
-        var dialog = new Window
+        var dialog = new ModalWindow
         {
             Title = "Период логов",
             Width = 620,
@@ -4663,7 +6463,7 @@ public sealed class MainWindow : Window
         var root = new Grid
         {
             RowDefinitions = new RowDefinitions("Auto,*"),
-            Background = Brush("#080d12"),
+            Background = PageBackground(),
             Children =
             {
                 toolbar,
@@ -4751,7 +6551,7 @@ public sealed class MainWindow : Window
         var paginationPanel = new Border
         {
             Height = 52,
-            Background = Brush("#111820"),
+            Background = PanelBrush("#111820", 188),
             BorderBrush = Brush("#2b3442"),
             BorderThickness = new Thickness(0, 1, 0, 0),
             Padding = new Thickness(14, 0),
@@ -4762,7 +6562,7 @@ public sealed class MainWindow : Window
         var detailPanel = new Border
         {
             Margin = new Thickness(16, 0, 0, 0),
-            Background = Brush("#151d28"),
+            Background = PanelBrush("#151d28", 188),
             BorderBrush = Brush("#253044"),
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(7),
@@ -4830,10 +6630,10 @@ public sealed class MainWindow : Window
 
         Border PaymentBadge(WorkShiftPayment payment)
         {
-            var color = PaymentColor(payment);
+            var color = payment.IsRefunded ? "#ff7b83" : PaymentColor(payment);
             return new Border
             {
-                Background = Brush(PaymentBackground(payment)),
+                Background = Brush(payment.IsRefunded ? "#451820" : PaymentBackground(payment)),
                 CornerRadius = new CornerRadius(8),
                 Padding = new Thickness(8, 3),
                 Margin = new Thickness(12, 0),
@@ -5172,22 +6972,41 @@ public sealed class MainWindow : Window
 
             foreach (var payment in filteredPayments.Skip((currentPage - 1) * paymentsPerPage).Take(paymentsPerPage))
             {
+                var rowColor = payment.IsRefunded ? "#ff8a91" : "#f5f7ff";
                 var grid = TableGrid();
-                AddCell(grid, Cell(payment.Id.ToString(), "#f5f7ff", FontWeight.SemiBold), 0);
-                AddCell(grid, Cell(payment.DateText), 1);
-                AddCell(grid, Cell(payment.Category), 2);
-                AddCell(grid, Cell(payment.ClientDisplay, string.IsNullOrWhiteSpace(payment.ClientUuid) ? "#8f9aad" : "#c8d0df"), 3);
+                AddCell(grid, Cell(payment.Id.ToString(), rowColor, FontWeight.SemiBold), 0);
+                AddCell(grid, Cell(payment.DateText, rowColor), 1);
+                AddCell(grid, Cell(payment.Category, rowColor), 2);
+                AddCell(grid, Cell(
+                    payment.ClientDisplay,
+                    payment.IsRefunded
+                        ? rowColor
+                        : string.IsNullOrWhiteSpace(payment.ClientUuid) ? "#8f9aad" : "#c8d0df"), 3);
                 AddCell(grid, PaymentBadge(payment), 4);
-                AddCell(grid, Cell(payment.TotalText, payment.IsRefunded ? "#ff6b73" : "#f5f7ff", FontWeight.SemiBold), 5);
-                if (RefundIsAvailable(payment))
+                AddCell(grid, Cell(payment.TotalText, rowColor, FontWeight.SemiBold), 5);
+                if (payment.IsRefunded)
+                {
+                    AddCell(grid, new TextBlock
+                    {
+                        Text = "Отменено",
+                        Foreground = Brush("#ff6b73"),
+                        FontWeight = FontWeight.SemiBold,
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        VerticalAlignment = VerticalAlignment.Center
+                    }, 6);
+                }
+                else if (RefundIsAvailable(payment))
                     AddCell(grid, RefundButton(payment, rowRefundControls), 6);
 
                 var row = new Button
                 {
                     Height = 58,
                     Padding = new Thickness(0),
-                    Background = selectedPayment?.Id == payment.Id ? Brush("#1d385e") : Brushes.Transparent,
-                    BorderBrush = Brushes.Transparent,
+                    Background = payment.IsRefunded
+                        ? Brush(selectedPayment?.Id == payment.Id ? "#4a1c25" : "#32141a")
+                        : selectedPayment?.Id == payment.Id ? Brush("#1d385e") : Brushes.Transparent,
+                    BorderBrush = payment.IsRefunded ? Brush("#7d2835") : Brushes.Transparent,
+                    BorderThickness = payment.IsRefunded ? new Thickness(1, 0) : new Thickness(0),
                     HorizontalAlignment = HorizontalAlignment.Stretch,
                     HorizontalContentAlignment = HorizontalAlignment.Stretch,
                     Content = grid
@@ -5356,7 +7175,7 @@ public sealed class MainWindow : Window
 
         var modePanel = new Border
         {
-            Background = Brush("#252b34"),
+            Background = PanelBrush("#252b34", 196),
             CornerRadius = new CornerRadius(7),
             Padding = new Thickness(4),
             Child = new StackPanel { Orientation = Orientation.Horizontal, Children = { allButton, postButton } }
@@ -5399,7 +7218,7 @@ public sealed class MainWindow : Window
         var table = new Grid { RowDefinitions = new RowDefinitions("Auto,*,Auto") };
         table.Children.Add(new Border
         {
-            Background = Brush("#151d28"),
+            Background = PanelBrush("#151d28", 188),
             BorderBrush = Brush("#2b3442"),
             BorderThickness = new Thickness(0, 0, 0, 1),
             Child = header
@@ -5407,7 +7226,7 @@ public sealed class MainWindow : Window
         var rowsScroll = new ScrollViewer
         {
             Content = rows,
-            Background = Brush("#151d28"),
+            Background = PanelBrush("#151d28", 174),
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto
         };
@@ -5426,7 +7245,7 @@ public sealed class MainWindow : Window
         };
         body.Children.Add(new Border
         {
-            Background = Brush("#151d28"),
+            Background = PanelBrush("#151d28", 188),
             BorderBrush = Brush("#202a38"),
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(7),
@@ -5438,7 +7257,7 @@ public sealed class MainWindow : Window
         var root = new Grid
         {
             RowDefinitions = new RowDefinitions("Auto,*"),
-            Background = Brush("#080d12")
+            Background = PageBackground()
         };
         root.Children.Add(toolbar);
         Grid.SetRow(body, 1);
@@ -5620,7 +7439,7 @@ public sealed class MainWindow : Window
         {
             RowDefinitions = new RowDefinitions("Auto,*"),
             RowSpacing = 16,
-            Background = Brush("#080d12")
+            Background = PageBackground()
         };
         root.Children.Add(header);
         Grid.SetRow(timelineHost, 1);
@@ -5673,14 +7492,14 @@ public sealed class MainWindow : Window
             }
         }
         var totalHeight = y;
-        var leftCanvas = new Canvas { Width = labelWidth, Height = totalHeight, Background = Brush("#111820") };
-        var rightCanvas = new Canvas { Width = timelineWidth, Height = totalHeight, Background = Brush("#0d131a") };
+        var leftCanvas = new Canvas { Width = labelWidth, Height = totalHeight, Background = PanelBrush("#111820", 188) };
+        var rightCanvas = new Canvas { Width = timelineWidth, Height = totalHeight, Background = PanelBrush("#0d131a", 168) };
 
         var leftHeader = new Border
         {
             Width = labelWidth,
             Height = headerHeight,
-            Background = Brush("#151d28"),
+            Background = PanelBrush("#151d28", 200),
             BorderBrush = Brush("#2a3544"),
             BorderThickness = new Thickness(0, 0, 1, 1),
             Padding = new Thickness(16, 0),
@@ -5733,7 +7552,7 @@ public sealed class MainWindow : Window
                 {
                     Width = labelWidth,
                     Height = groupHeight,
-                    Background = Brush("#0d141c"),
+                    Background = PanelBrush("#0d141c", 204),
                     BorderBrush = Brush("#263244"),
                     BorderThickness = new Thickness(0, 0, 1, 1),
                     Padding = new Thickness(16, 0),
@@ -5748,7 +7567,7 @@ public sealed class MainWindow : Window
                 };
                 Canvas.SetTop(groupLabel, row.Top);
                 leftCanvas.Children.Add(groupLabel);
-                var groupBand = new Border { Width = timelineWidth, Height = groupHeight, Background = Brush("#0a1016") };
+                var groupBand = new Border { Width = timelineWidth, Height = groupHeight, Background = PanelBrush("#0a1016", 188) };
                 Canvas.SetTop(groupBand, row.Top);
                 rightCanvas.Children.Add(groupBand);
                 continue;
@@ -5762,7 +7581,7 @@ public sealed class MainWindow : Window
             {
                 Width = labelWidth,
                 Height = hostHeight,
-                Background = Brush("#151d28"),
+                Background = PanelBrush("#151d28", 214),
                 BorderBrush = Brush("#263244"),
                 BorderThickness = new Thickness(0, 0, 1, 1),
                 Padding = new Thickness(16, 0),
@@ -5788,7 +7607,7 @@ public sealed class MainWindow : Window
             {
                 Width = timelineWidth,
                 Height = hostHeight,
-                Background = Brush("#111820"),
+                Background = PanelBrush("#111820", 196),
                 BorderBrush = Brush("#263244"),
                 BorderThickness = new Thickness(0, 0, 0, 1)
             };
@@ -5879,7 +7698,7 @@ public sealed class MainWindow : Window
             Content = rightCanvas,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden,
             VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            Background = Brush("#0d131a")
+            Background = PanelBrush("#0d131a", 168)
         };
         var body = new Grid { ColumnDefinitions = new ColumnDefinitions(labelWidth + ",*") };
         body.Children.Add(leftCanvas);
@@ -5916,12 +7735,12 @@ public sealed class MainWindow : Window
             Content = body,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            Background = Brush("#080d12")
+            Background = PageBackground()
         };
         var result = new Grid
         {
             RowDefinitions = new RowDefinitions("*,Auto"),
-            Background = Brush("#080d12"),
+            Background = PageBackground(),
             Children = { verticalScroll, horizontalBar }
         };
         Grid.SetRow(horizontalBar, 1);
@@ -5946,7 +7765,7 @@ public sealed class MainWindow : Window
         return new ShopTabState
         {
             Title = string.IsNullOrWhiteSpace(title) ? NextShopTabTitle() : title.Trim(),
-            AutoTitle = false
+            AutoTitle = string.IsNullOrWhiteSpace(title)
         };
     }
 
@@ -6015,7 +7834,7 @@ public sealed class MainWindow : Window
         {
             cartItems.Clear();
             cartItems.AddRange((tab.Items ?? new List<CartItem>()).Select(x => x.Copy()));
-            paymentMethod = tab.PaymentMethod is "CARD" or "COMPOSITE" ? tab.PaymentMethod : "CASH";
+            paymentMethod = tab.PaymentMethod is "CASH" or "CARD" or "COMPOSITE" ? tab.PaymentMethod : "";
             selectedClient = string.IsNullOrWhiteSpace(tab.ClientUuid)
                 ? null
                 : new ClientInfo { Uuid = tab.ClientUuid, Nickname = tab.ClientDisplay };
@@ -6049,6 +7868,24 @@ public sealed class MainWindow : Window
         var tab = CreateEmptyShopTab();
         shopTabs.Add(tab);
         SwitchShopTab(tab.Id);
+    }
+
+    private void PrepareShopEntry()
+    {
+        SaveActiveShopTab();
+        var empty = shopTabs.FirstOrDefault(x =>
+            (x.Items?.Count ?? 0) == 0
+            && string.IsNullOrWhiteSpace(x.ClientUuid)
+            && string.IsNullOrWhiteSpace(x.ClientDisplay));
+        if (empty == null)
+        {
+            empty = CreateEmptyShopTab();
+            shopTabs.Add(empty);
+        }
+        empty.PaymentMethod = "";
+        activeShopTabId = empty.Id;
+        ApplyShopTabToWorkingState(empty);
+        SaveShopTabsFile();
     }
 
     private async Task RenameShopTabAsync(ShopTabState tab)
@@ -6191,11 +8028,12 @@ public sealed class MainWindow : Window
     {
         var grid = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions("300,*,330"),
-            Background = Brush("#080d12")
+            ColumnDefinitions = new ColumnDefinitions("300,*,430"),
+            Background = PageBackground()
         };
 
         paymentButtons.Clear();
+        debtPaymentButtons.Clear();
         clientSearchBox = new TextBox
         {
             Watermark = "Логин, телефон или последние 4 цифры",
@@ -6271,6 +8109,14 @@ public sealed class MainWindow : Window
             HorizontalAlignment = HorizontalAlignment.Stretch
         };
 
+        var debtPaymentGrid = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,*"),
+            ColumnSpacing = 8
+        };
+        AddDebtPaymentButton(debtPaymentGrid, 0, "Наличными", "CASH");
+        AddDebtPaymentButton(debtPaymentGrid, 1, "Картой", "CARD");
+
         var clientPanel = new StackPanel
         {
             Spacing = 12,
@@ -6283,13 +8129,21 @@ public sealed class MainWindow : Window
                     Content = clientResultsList,
                     MaxHeight = 190,
                     VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                    Background = Brush("#080d12")
+                    Background = PageBackground()
                 },
                 selectedClientText,
                 depositAmountBox,
                 bonusAmountBox,
                 bonusCommentBox,
                 depositAlreadyCreditedBox,
+                new TextBlock
+                {
+                    Text = "Как клиент оплатит при выходе",
+                    Foreground = Brush("#8f9aad"),
+                    FontSize = 12,
+                    FontWeight = FontWeight.SemiBold
+                },
+                debtPaymentGrid,
                 creditBalanceButton,
                 GhostButton("Добавить в корзину", AddDepositToCart),
                 storeStatusText
@@ -6331,7 +8185,7 @@ public sealed class MainWindow : Window
             MaxHeight = 570,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            Background = Brush("#080d12")
+            Background = PageBackground()
         });
         var catalog = Panel("Ассортимент", catalogStack);
         Grid.SetColumn(catalog, 1);
@@ -6350,6 +8204,32 @@ public sealed class MainWindow : Window
         cardPartBox = SplitAmountBox("Картой");
         cashPartBox.TextChanged += (_, _) => SyncSplitFromCash();
         cardPartBox.TextChanged += (_, _) => SyncSplitFromCard();
+        cashReceivedBox = SplitAmountBox("Сколько дал клиент");
+        cashReceivedBox.TextChanged += (_, _) => RefreshCashPaymentPanel();
+        cashChangeText = new TextBlock
+        {
+            Text = "Сдача: 0 ₽",
+            Foreground = Brush("#22c55e"),
+            FontWeight = FontWeight.SemiBold,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        cashChangePanel = new StackPanel
+        {
+            Spacing = 8,
+            IsVisible = false,
+            Children =
+            {
+                new TextBlock
+                {
+                    Text = "Получено наличными",
+                    Foreground = Brush("#8f9aad"),
+                    FontSize = 12,
+                    FontWeight = FontWeight.SemiBold
+                },
+                cashReceivedBox,
+                cashChangeText
+            }
+        };
 
         var paymentGrid = new Grid
         {
@@ -6368,31 +8248,46 @@ public sealed class MainWindow : Window
         };
         Grid.SetColumn(cardPartBox, 1);
 
-        var cartPanel = new StackPanel
+        var cartScroll = new ScrollViewer
+        {
+            Content = cartItemsList,
+            MinHeight = 280,
+            MaxHeight = 430,
+            VerticalAlignment = VerticalAlignment.Top,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            Background = PageBackground()
+        };
+        checkoutButton = AccentButton("Оплатить", () => _ = CreatePaymentFromCartAsync());
+        checkoutButton.HorizontalAlignment = HorizontalAlignment.Stretch;
+        var clearCartButton = GhostButton("Очистить", ClearCart);
+        clearCartButton.HorizontalAlignment = HorizontalAlignment.Stretch;
+        var cartFooter = new StackPanel
         {
             Spacing = 12,
             Children =
             {
-                new ScrollViewer
-                {
-                    Content = cartItemsList,
-                    MaxHeight = 315,
-                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                    Background = Brush("#080d12")
-                },
                 cartTotalText,
                 paymentGrid,
                 splitGrid,
-                AccentButton("Оплатить", () => _ = CreatePaymentFromCartAsync()),
-                GhostButton("Очистить", ClearCart)
+                cashChangePanel,
+                checkoutButton,
+                clearCartButton
             }
         };
+        var cartPanel = new Grid
+        {
+            RowDefinitions = new RowDefinitions("Auto,Auto"),
+            RowSpacing = 16,
+            Children = { cartScroll, cartFooter }
+        };
+        Grid.SetRow(cartFooter, 1);
         var cart = Panel("Корзина", cartPanel);
         Grid.SetColumn(cart, 2);
         grid.Children.Add(cart);
 
         RefreshShopModeButtons();
         RefreshPaymentButtons();
+        RefreshDebtPaymentButtons();
         RenderClientResults();
         RenderCart();
         RenderShopCatalog();
@@ -6401,7 +8296,7 @@ public sealed class MainWindow : Window
         var root = new Grid
         {
             RowDefinitions = new RowDefinitions("Auto,*"),
-            Background = Brush("#080d12")
+            Background = PageBackground()
         };
         root.Children.Add(BuildShopTabsBar());
         Grid.SetRow(grid, 1);
@@ -6423,9 +8318,22 @@ public sealed class MainWindow : Window
 
     private void AddPaymentButton(Grid grid, int column, string text, string method)
     {
-        var button = PaymentButton(text);
+        var button = PaymentButton(text, method);
         button.Click += (_, _) => SetPaymentMethod(method);
         paymentButtons[method] = button;
+        Grid.SetColumn(button, column);
+        grid.Children.Add(button);
+    }
+
+    private void AddDebtPaymentButton(Grid grid, int column, string text, string method)
+    {
+        var button = PaymentButton(text, method);
+        button.Click += (_, _) =>
+        {
+            debtPaymentMethod = method;
+            RefreshDebtPaymentButtons();
+        };
+        debtPaymentButtons[method] = button;
         Grid.SetColumn(button, column);
         grid.Children.Add(button);
     }
@@ -6598,7 +8506,8 @@ public sealed class MainWindow : Window
                 Amount = 1,
                 UnitCost = sum,
                 ClientUuid = selectedClient.Uuid,
-                ClientDisplay = selectedClient.Display
+                ClientDisplay = selectedClient.Display,
+                PaymentMethod = alreadyCredited ? debtPaymentMethod : ""
             });
         }
         if (bonus > 0)
@@ -6638,14 +8547,8 @@ public sealed class MainWindow : Window
             SetStoreStatus("Сумма пополнения должна быть больше нуля.");
             return;
         }
-        if (paymentMethod == "COMPOSITE")
-        {
-            SetStoreStatus("Для мгновенного пополнения выберите наличные или карту. Разделить оплату можно при закрытии счёта.");
-            return;
-        }
-
         var client = selectedClient;
-        var method = paymentMethod == "CARD" ? "CARD" : "CASH";
+        var method = debtPaymentMethod == "CARD" ? "CARD" : "CASH";
         try
         {
             creditDepositInProgress = true;
@@ -6669,7 +8572,8 @@ public sealed class MainWindow : Window
                 Amount = 1,
                 UnitCost = sum,
                 ClientUuid = client.Uuid,
-                ClientDisplay = client.Display
+                ClientDisplay = client.Display,
+                PaymentMethod = method
             });
             if (depositAmountBox != null) depositAmountBox.Text = "";
             if (depositAlreadyCreditedBox != null) depositAlreadyCreditedBox.IsChecked = false;
@@ -6721,7 +8625,8 @@ public sealed class MainWindow : Window
         var sub = item.Type switch
         {
             "DEPOSIT" => item.ClientDisplay,
-            "DEPOSIT_DEBT" => item.ClientDisplay + "  •  уже зачислен, оплатит позже",
+            "DEPOSIT_DEBT" => item.ClientDisplay + "  •  уже зачислен, оплатит позже: "
+                + PaymentMethodTitle(string.IsNullOrWhiteSpace(item.PaymentMethod) ? "CASH" : item.PaymentMethod),
             "BONUS" => item.ClientDisplay + "  •  " + (string.IsNullOrWhiteSpace(item.Comment) ? "ЛОТ" : item.Comment),
             _ => item.Amount + " × " + MoneyText(item.UnitCost)
         };
@@ -6793,6 +8698,9 @@ public sealed class MainWindow : Window
     private void ClearCart()
     {
         cartItems.Clear();
+        paymentMethod = "";
+        if (cashReceivedBox != null) cashReceivedBox.Text = "";
+        RefreshPaymentButtons();
         RenderCart();
         SetStoreStatus("Корзина очищена.");
     }
@@ -6803,6 +8711,7 @@ public sealed class MainWindow : Window
         if (paymentMethod == "COMPOSITE")
             ResetSplitAmounts();
         RefreshPaymentButtons();
+        RefreshCashPaymentPanel(true);
         SaveActiveShopTab();
     }
 
@@ -6818,27 +8727,27 @@ public sealed class MainWindow : Window
         var splitVisible = paymentMethod == "COMPOSITE";
         if (cashPartBox != null) cashPartBox.IsVisible = splitVisible;
         if (cardPartBox != null) cardPartBox.IsVisible = splitVisible;
+        RefreshCashPaymentPanel();
+    }
+
+    private void RefreshDebtPaymentButtons()
+    {
+        foreach (var pair in debtPaymentButtons)
+        {
+            var active = string.Equals(pair.Key, debtPaymentMethod, StringComparison.OrdinalIgnoreCase);
+            pair.Value.Background = active ? Brush("#26384f") : Brush("#202938");
+            pair.Value.BorderBrush = active ? Brush("#3b82f6") : Brush("#334155");
+        }
     }
 
     private void ResetSplitAmounts()
     {
-        var total = cartItems.Sum(x => x.Total);
         splitPaymentSyncing = true;
         try
         {
             if (cashPartBox == null || cardPartBox == null) return;
-            if (total <= 0)
-            {
-                cashPartBox.Text = "";
-                cardPartBox.Text = "";
-            }
-            else
-            {
-                var card = Math.Round(total / 2m, 2);
-                var cash = total - card;
-                cashPartBox.Text = cash.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
-                cardPartBox.Text = card.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
-            }
+            cashPartBox.Text = "";
+            cardPartBox.Text = "";
         }
         finally
         {
@@ -6856,6 +8765,7 @@ public sealed class MainWindow : Window
         splitPaymentSyncing = true;
         try { cardPartBox.Text = card.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture); }
         finally { splitPaymentSyncing = false; }
+        RefreshCashPaymentPanel();
     }
 
     private void SyncSplitFromCard()
@@ -6868,6 +8778,7 @@ public sealed class MainWindow : Window
         splitPaymentSyncing = true;
         try { cashPartBox.Text = cash.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture); }
         finally { splitPaymentSyncing = false; }
+        RefreshCashPaymentPanel();
     }
 
     private void UpdateCartTotal()
@@ -6883,6 +8794,51 @@ public sealed class MainWindow : Window
         }
         if (paymentMethod == "COMPOSITE")
             ResetSplitAmounts();
+        RefreshCashPaymentPanel(paymentMethod == "CASH");
+    }
+
+    private decimal CurrentCashDue()
+    {
+        var debtCash = cartItems
+            .Where(x => x.Type == "DEPOSIT_DEBT"
+                && !string.Equals(x.PaymentMethod, "CARD", StringComparison.OrdinalIgnoreCase))
+            .Sum(x => x.Total);
+        var apiTotal = cartItems.Where(x => x.Type != "DEPOSIT_DEBT").Sum(x => x.Total);
+        if (paymentMethod == "CASH") return apiTotal + debtCash;
+        if (paymentMethod != "COMPOSITE") return debtCash;
+        return TryParseMoney(cashPartBox?.Text, out var cash) ? cash + debtCash : debtCash;
+    }
+
+    private void RefreshCashPaymentPanel(bool resetReceived = false)
+    {
+        if (cashChangePanel == null || cashReceivedBox == null || cashChangeText == null) return;
+
+        var methodSelected = paymentMethod is "CASH" or "CARD" or "COMPOSITE";
+        var cashDue = paymentMethod == "CASH" ? CurrentCashDue() : 0m;
+        cashChangePanel.IsVisible = cashDue > 0;
+        if (resetReceived && cashDue > 0)
+            cashReceivedBox.Text = cashDue.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+
+        var cashValid = cashDue <= 0
+            || TryParseMoney(cashReceivedBox.Text, out var received) && received >= cashDue;
+        var change = cashValid && cashDue > 0 && TryParseMoney(cashReceivedBox.Text, out var paid)
+            ? paid - cashDue
+            : 0m;
+        cashChangeText.Text = cashValid
+            ? "Сдача: " + MoneyText(change)
+            : "Недостаточно наличных";
+        cashChangeText.Foreground = cashValid ? Brush("#22c55e") : Brush("#ff5c66");
+
+        var splitValid = paymentMethod != "COMPOSITE"
+            || TryParseMoney(cashPartBox?.Text, out var cash)
+            && TryParseMoney(cardPartBox?.Text, out var card)
+            && cash > 0 && card > 0
+            && Math.Abs(cash + card - cartItems.Where(x => x.Type != "DEPOSIT_DEBT").Sum(x => x.Total)) <= 0.01m;
+        if (checkoutButton != null)
+        {
+            checkoutButton.IsEnabled = cartItems.Count > 0 && methodSelected && cashValid && splitValid;
+            checkoutButton.Opacity = checkoutButton.IsEnabled ? 1 : 0.45;
+        }
     }
 
     private async Task CreatePaymentFromCartAsync()
@@ -6892,6 +8848,12 @@ public sealed class MainWindow : Window
             SetStoreStatus("Корзина пустая.");
             return;
         }
+        if (paymentMethod is not ("CASH" or "CARD" or "COMPOSITE"))
+        {
+            SetStoreStatus("Выберите способ оплаты.");
+            RefreshCashPaymentPanel();
+            return;
+        }
         if (cartItems.Any(x => (x.Type == "DEPOSIT" || x.Type == "DEPOSIT_DEBT" || x.Type == "BONUS") && string.IsNullOrWhiteSpace(x.ClientUuid)))
         {
             SetStoreStatus("В корзине есть пополнение или бонусы без клиента.");
@@ -6899,7 +8861,8 @@ public sealed class MainWindow : Window
         }
 
         var total = cartItems.Sum(x => x.Total);
-        var creditedDebt = cartItems.Where(x => x.Type == "DEPOSIT_DEBT").Sum(x => x.Total);
+        var debtItems = cartItems.Where(x => x.Type == "DEPOSIT_DEBT").ToList();
+        var creditedDebt = debtItems.Sum(x => x.Total);
         var apiItems = cartItems.Where(x => x.Type != "DEPOSIT_DEBT").ToList();
         var apiTotal = apiItems.Sum(x => x.Total);
         var bonusTotal = cartItems.Sum(x => x.BonusTotal);
@@ -6915,28 +8878,12 @@ public sealed class MainWindow : Window
         }
         var cardSum = 0m;
         if (apiTotal > 0 && !TryGetCardSum(apiTotal, out cardSum)) return;
-        var confirmText = total > 0
-            ? "Закрыть счёт на " + MoneyText(total) + "?\nМетод: " + PaymentMethodTitle(paymentMethod)
-            : "Начислить клиенту бонусы?";
-        if (apiTotal > 0)
-            confirmText += "\nНовая операция SmartShell: " + MoneyText(apiTotal);
-        if (creditedDebt > 0)
-            confirmText += "\nУже зачисленный депозит (повторно не начислять): " + MoneyText(creditedDebt);
-        if (apiTotal > 0 && paymentMethod == "COMPOSITE")
-            confirmText += "\nКартой: " + MoneyText(cardSum) + " | Наличными: " + MoneyText(apiTotal - cardSum);
-        if (bonusTotal > 0)
-            confirmText += "\nБонусы: ★ " + BonusText(bonusTotal);
-
-        var cashDue = paymentMethod == "CASH"
-            ? total
-            : paymentMethod == "COMPOSITE" ? total - cardSum : 0m;
-        if (cashDue > 0)
+        var cashDue = CurrentCashDue();
+        if (paymentMethod == "CASH" && cashDue > 0
+            && (!TryParseMoney(cashReceivedBox?.Text, out var received) || received < cashDue))
         {
-            if (!await ShowCashPaymentDialogAsync(total, cashDue, cardSum))
-                return;
-        }
-        else if (!await ConfirmAsync("Подтвердить оплату", confirmText, false))
-        {
+            SetStoreStatus("Укажите полученную от клиента сумму наличными.");
+            RefreshCashPaymentPanel();
             return;
         }
 
@@ -6999,7 +8946,7 @@ public sealed class MainWindow : Window
 
     private async Task<bool> ShowCashPaymentDialogAsync(decimal total, decimal cashDue, decimal cardSum)
     {
-        var dialog = new Window
+        var dialog = new ModalWindow
         {
             Title = "Оплата наличными",
             Width = 460,
@@ -7439,7 +9386,7 @@ public sealed class MainWindow : Window
         var grid = new Grid
         {
             ColumnDefinitions = new ColumnDefinitions("340,*"),
-            Background = Brush("#080d12")
+            Background = PageBackground()
         };
 
         psDeviceBox = new ComboBox
@@ -7611,6 +9558,12 @@ public sealed class MainWindow : Window
             ShowToast("Таймер завершён", message);
             ShowWindowsNotification("Таймер PS завершён", message, true);
         }
+
+        if (completedNow.Count > 0 && screen != "ps")
+        {
+            psTimerAttentionPending = true;
+            UpdateNavButtonStyles();
+        }
     }
 
     private void UpdateHostCountdownCards()
@@ -7710,7 +9663,7 @@ public sealed class MainWindow : Window
 
         return new Border
         {
-            Background = timerSession.Completed ? Brush("#111820") : Brush("#101f1a"),
+            Background = PanelBrush("#101f1b", 188),
             BorderBrush = timerSession.Completed ? Brush("#263244") : Brush("#1f8f4d"),
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(8),
@@ -7721,23 +9674,25 @@ public sealed class MainWindow : Window
 
     private Border Panel(string titleText, Control content)
     {
+        var panelContent = new StackPanel
+        {
+            Spacing = 14,
+            Children =
+            {
+                new TextBlock { Text = titleText, Foreground = Brush("#f5f7ff"), FontSize = 18, FontWeight = FontWeight.SemiBold },
+                content
+            }
+        };
+
         return new Border
         {
-            Background = Brush("#121a24"),
+            Background = PanelBrush("#121a25", 150),
             BorderBrush = Brush("#263244"),
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(8),
             Padding = new Thickness(16),
             Margin = new Thickness(0, 0, 14, 0),
-            Child = new StackPanel
-            {
-                Spacing = 14,
-                Children =
-                {
-                    new TextBlock { Text = titleText, Foreground = Brush("#f5f7ff"), FontSize = 18, FontWeight = FontWeight.SemiBold },
-                    content
-                }
-            }
+            Child = WithDragonWatermark(panelContent, 112, 0.06)
         };
     }
 
@@ -7754,18 +9709,33 @@ public sealed class MainWindow : Window
         };
     }
 
-    private Button PaymentButton(string text)
+    private Button PaymentButton(string text, string method)
     {
         return new Button
         {
-            Height = 42,
+            Height = 56,
             MinWidth = 0,
             HorizontalAlignment = HorizontalAlignment.Stretch,
             HorizontalContentAlignment = HorizontalAlignment.Center,
             Background = Brush("#202938"),
             Foreground = Brush("#f5f7ff"),
             BorderBrush = Brush("#334155"),
-            Content = text
+            Content = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 8,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Children =
+                {
+                    PaymentIcon(method),
+                    new TextBlock
+                    {
+                        Text = text,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        FontWeight = FontWeight.SemiBold
+                    }
+                }
+            }
         };
     }
 
@@ -7811,10 +9781,12 @@ public sealed class MainWindow : Window
         hostHoverRemainingBlocks.Clear();
         hostBottomBlocks.Clear();
         mapCanvas.Children.Clear();
+        var offset = MapLayoutOffset();
         foreach (var record in records.Values.OrderBy(x => NaturalKey(x.Name)))
         {
             var card = HostCard(record);
-            var point = layout.TryGetValue(record.Name, out var p) ? p : new Point(30, 30);
+            var placed = layout.TryGetValue(record.Name, out var p) ? p : new Point(30, 30);
+            var point = new Point(placed.X + offset.X, placed.Y + offset.Y);
             Canvas.SetLeft(card, point.X);
             Canvas.SetTop(card, point.Y);
             mapCanvas.Children.Add(card);
@@ -7855,6 +9827,14 @@ public sealed class MainWindow : Window
                 SelectHostsInRectangle(mapSelectionStart.Value, e.GetPosition(mapCanvas), mapSelectionAdditive);
                 e.Handled = true;
             }
+            else
+            {
+                selectedHostKeys.Clear();
+                selected = null;
+                RefreshMap();
+                UpdateSelectedPanel();
+                e.Handled = true;
+            }
 
             mapSelectionStart = null;
             mapSelectionDragging = false;
@@ -7885,9 +9865,11 @@ public sealed class MainWindow : Window
         if (!additive)
             selectedHostKeys.Clear();
 
+        var offset = MapLayoutOffset();
         foreach (var record in records.Values)
         {
-            var point = layout.TryGetValue(record.Name, out var placed) ? placed : new Point(30, 30);
+            var placed = layout.TryGetValue(record.Name, out var p) ? p : new Point(30, 30);
+            var point = new Point(placed.X + offset.X, placed.Y + offset.Y);
             var cardRect = new Rect(point.X, point.Y, 73, 73);
             if (selectionRect.Intersects(cardRect))
                 selectedHostKeys.Add(record.Name);
@@ -7900,6 +9882,10 @@ public sealed class MainWindow : Window
         RefreshMap();
         UpdateSelectedPanel();
     }
+
+    private Point MapLayoutOffset() => new(
+        Math.Max(0, (mapCanvas.Width - 960) / 2),
+        Math.Max(0, (mapCanvas.Height - 700) / 2));
 
     private Border HostCard(PcRecord record)
     {
@@ -8067,6 +10053,7 @@ public sealed class MainWindow : Window
                 contextMenuPending = true;
             }
             UpdateSelectedPanel();
+            e.Handled = true;
         };
         card.PointerReleased += (_, _) =>
         {
@@ -8291,7 +10278,7 @@ public sealed class MainWindow : Window
 
     private async Task ShowClientCardDialogAsync(ClientInfo client, Window owner)
     {
-        var dialog = new Window
+        var dialog = new ModalWindow
         {
             Title = "Клиент " + client.Display,
             Width = 1250,
@@ -8347,9 +10334,28 @@ public sealed class MainWindow : Window
         {
             var value = string.IsNullOrWhiteSpace(payment) ? "—" : payment;
             var normalized = value.ToUpperInvariant();
-            if (normalized.Contains("НАЛИЧ")) return HistoryBadge("▤  " + value, "#14392d", "#35d48a");
-            if (normalized.Contains("КАРТ")) return HistoryBadge("▣  " + value, "#15324a", "#4aa9ff");
-            if (normalized.Contains("ДЕПОЗ")) return HistoryBadge("▱  " + value, "#2b2148", "#a77cff");
+
+            Control VectorBadge(string icon, string background, string foreground) => new Border
+            {
+                Background = Brush(background),
+                CornerRadius = new CornerRadius(10),
+                Padding = new Thickness(8, 3),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                Child = new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    Spacing = 6,
+                    Children =
+                    {
+                        DashboardIcon(icon, foreground, 16),
+                        HistoryText(value, Brush(foreground), true)
+                    }
+                }
+            };
+
+            if (normalized.Contains("НАЛИЧ")) return VectorBadge("cash", "#14392d", "#35d48a");
+            if (normalized.Contains("КАРТ")) return VectorBadge("card", "#15324a", "#4aa9ff");
+            if (normalized.Contains("ДЕПОЗ")) return VectorBadge("wallet", "#2b2148", "#a77cff");
             if (normalized.Contains("БОНУС")) return HistoryBadge("★  " + value, "#402d17", "#ffb84d");
             if (normalized.Contains("РАЗДЕЛ")) return HistoryBadge("÷  " + value, "#26313d", "#b9c6d8");
             return HistoryBadge(value, "#202a35", "#b9c6d8");
@@ -8535,7 +10541,7 @@ public sealed class MainWindow : Window
             await ShowDepositTopUpDialogAsync(client, dialog);
             await LoadHistoryAsync(activeMode, activePage);
         });
-        var right = SalePanel(new Grid
+        var rightContent = new Grid
         {
             RowDefinitions = new RowDefinitions("Auto,*,Auto"),
             Children =
@@ -8544,9 +10550,10 @@ public sealed class MainWindow : Window
                 new ScrollViewer { Content = historyRows, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto },
                 paginationPanel
             }
-        }, new Thickness(0));
-        Grid.SetRow(((Grid)right.Child!).Children[1], 1);
-        Grid.SetRow(((Grid)right.Child!).Children[2], 2);
+        };
+        Grid.SetRow(rightContent.Children[1], 1);
+        Grid.SetRow(rightContent.Children[2], 2);
+        var right = SalePanel(rightContent, new Thickness(0));
 
         var body = new Grid
         {
@@ -8931,7 +10938,7 @@ public sealed class MainWindow : Window
 
             ClientInfo? activeClient = null;
             var activeClientQuery = ActiveClientQuery(record);
-            if (record.HasSession && !string.IsNullOrWhiteSpace(activeClientQuery))
+            if (!string.IsNullOrWhiteSpace(activeClientQuery))
             {
                 try
                 {
@@ -8948,7 +10955,7 @@ public sealed class MainWindow : Window
             var shiftSeconds = record.HasSession && record.SessionTimeLeftSeconds > 0
                 ? record.SessionTimeLeftSeconds
                 : (int?)null;
-            var tariffs = await service.LoadTariffsAsync(config, record.HostId, record.HasSession ? activeClient?.Uuid : null, shiftSeconds, CancellationToken.None);
+            var tariffs = await service.LoadTariffsAsync(config, record.HostId, activeClient?.Uuid ?? record.ClientUuid, shiftSeconds, CancellationToken.None);
             if (tariffs.Count == 0)
             {
                 ShowToast(record.Name, "SmartShell не вернул активные тарифы.");
@@ -8986,12 +10993,13 @@ public sealed class MainWindow : Window
     {
         if (!string.IsNullOrWhiteSpace(record.ClientPhone)) return record.ClientPhone!;
         if (!string.IsNullOrWhiteSpace(record.ClientName)) return record.ClientName!;
+        if (!string.IsNullOrWhiteSpace(record.ClientUuid)) return record.ClientUuid!;
         return "";
     }
 
     private async Task<TariffSaleResult?> ShowTariffSaleDialogAsync(PcRecord record, List<TariffInfo> tariffs, List<ShopItem> shopItems, ClientInfo? activeClient)
     {
-        var dialog = new Window
+        var dialog = new ModalWindow
         {
             Title = "Продажа для " + record.Name,
             Width = 1500,
@@ -9322,7 +11330,7 @@ public sealed class MainWindow : Window
                 var refreshed = await service.LoadTariffsAsync(
                     config,
                     record.HostId,
-                    record.HasSession ? activeClient?.Uuid : null,
+                    activeClient?.Uuid ?? record.ClientUuid,
                     shiftSeconds > 0 ? shiftSeconds : null,
                     CancellationToken.None);
 
@@ -9603,13 +11611,15 @@ public sealed class MainWindow : Window
                 }
             }
 
-            var clientQuery = record.HasSession ? activeQuery : (clientBox.Text ?? "");
+            var clientQuery = activeClient != null || HasLoggedInClient(record) || record.HasSession
+                ? activeQuery
+                : (clientBox.Text ?? "");
             dialog.Close(new TariffSaleResult
             {
                 Tariff = pickedTariff,
                 Items = saleCartItems.Select(x => x.Copy()).ToList(),
                 ClientQuery = clientQuery,
-                ClientUuid = activeClient?.Uuid ?? (clientBox.Text == selectedClient?.Display ? selectedClient?.Uuid ?? "" : ""),
+                ClientUuid = activeClient?.Uuid ?? record.ClientUuid ?? (clientBox.Text == selectedClient?.Display ? selectedClient?.Uuid ?? "" : ""),
                 Method = method,
                 CardSum = cardSum
             });
@@ -9810,7 +11820,7 @@ public sealed class MainWindow : Window
         Grid.SetColumn(promoButton, 1);
 
         var root = new Grid { RowDefinitions = new RowDefinitions("Auto,*,Auto") };
-        if (record.HasSession)
+        if (record.HasSession || HasLoggedInClient(record) || activeClient != null)
         {
             root.Children.Add(BuildSaleActiveClientCard(record, activeClient, dialog));
         }
@@ -9851,8 +11861,13 @@ public sealed class MainWindow : Window
 
         var sub = activeClient?.Phone;
         if (string.IsNullOrWhiteSpace(sub)) sub = record.ClientPhone;
-        if (string.IsNullOrWhiteSpace(sub)) sub = record.ClientName;
-        if (string.IsNullOrWhiteSpace(sub)) sub = "активный сеанс";
+        if (string.IsNullOrWhiteSpace(sub)) sub = "Телефон не указан";
+        var balanceText = CopyableClientText(activeClient?.BalanceText ?? "—", "#a9b2c5", 14, true);
+        var bonusText = CopyableClientText(
+            activeClient == null || activeClient.Bonus <= 0 ? "Нет бонусов" : activeClient.BonusText,
+            "#a9b2c5",
+            14,
+            true);
 
         var depositButton = SalePrimaryButton("₽  Пополнить депозит");
         depositButton.Height = 44;
@@ -9873,6 +11888,9 @@ public sealed class MainWindow : Window
             }
 
             await ShowDepositTopUpDialogAsync(client, dialog);
+            activeClient ??= client;
+            balanceText.Text = client.BalanceText;
+            bonusText.Text = client.Bonus <= 0 ? "Нет бонусов" : client.BonusText;
         };
 
         return new StackPanel
@@ -9911,8 +11929,8 @@ public sealed class MainWindow : Window
                                     VerticalAlignment = VerticalAlignment.Center,
                                     Children =
                                     {
-                                        new TextBlock { Text = display, Foreground = Brush("#f5f7ff"), FontSize = 16, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis },
-                                        new TextBlock { Text = sub, Foreground = Brush("#8f9aad"), FontSize = 13, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis }
+                                        CopyableClientText(display, "#f5f7ff", 16, true),
+                                        CopyableClientText(sub, "#8f9aad", 13, true)
                                     }
                                 }
                             }
@@ -9927,8 +11945,8 @@ public sealed class MainWindow : Window
                             Child = new TextBlock { Text = "Клиент", Foreground = Brush("#2f8cff"), FontSize = 12, FontWeight = FontWeight.SemiBold }
                         },
                         new Border { Height = 1, Background = Brush("#303a48") },
-                        SaleMetricLine("₽", activeClient?.BalanceText ?? "—"),
-                        SaleMetricLine("★", activeClient == null || activeClient.Bonus <= 0 ? "Нет бонусов" : activeClient.BonusText),
+                        SaleMetricLine("₽", balanceText),
+                        SaleMetricLine("★", bonusText),
                         SaleMetricLine("%", activeClient?.DiscountText ?? "Нет скидки")
                     }
                 }, new Thickness(14)),
@@ -9945,7 +11963,14 @@ public sealed class MainWindow : Window
         {
             try
             {
-                client = await service.LoadClientDetailsAsync(config, client.Uuid, CancellationToken.None) ?? client;
+                var loaded = await service.LoadClientDetailsAsync(config, client.Uuid, CancellationToken.None);
+                if (loaded != null)
+                {
+                    client.Deposit = loaded.Deposit;
+                    client.Bonus = loaded.Bonus;
+                    client.PersonalDiscount = loaded.PersonalDiscount;
+                    client.DiscountText = loaded.DiscountText;
+                }
             }
             catch
             {
@@ -9953,7 +11978,7 @@ public sealed class MainWindow : Window
             }
         }
 
-        var dialog = new Window
+        var dialog = new ModalWindow
         {
             Title = "Пополнение счёта",
             Width = 731,
@@ -10345,7 +12370,7 @@ public sealed class MainWindow : Window
         }
         var canManageClients = apiAccessInfo?.CanManageClients == true;
 
-        var dialog = new Window
+        var dialog = new ModalWindow
         {
             Title = "Данные клиента",
             Width = 560,
@@ -10578,6 +12603,12 @@ public sealed class MainWindow : Window
         var name = !string.IsNullOrWhiteSpace(client.Nickname) ? client.Nickname : client.Phone;
         if (string.IsNullOrWhiteSpace(name)) name = "Клиент";
         var phone = string.IsNullOrWhiteSpace(client.Phone) ? client.Uuid : client.Phone;
+        var balanceText = CopyableClientText(client.BalanceText, "#a9b2c5", 14, true);
+        var bonusText = CopyableClientText(
+            client.Bonus <= 0 ? "Нет бонусов" : client.BonusText,
+            "#a9b2c5",
+            14,
+            true);
         var editButton = new Button
         {
             Content = "Редактировать данные",
@@ -10594,7 +12625,12 @@ public sealed class MainWindow : Window
         var topUpButton = SalePrimaryButton("▣  Пополнить депозит");
         topUpButton.IsVisible = topUpClient != null;
         if (topUpClient != null)
-            topUpButton.Click += async (_, _) => await topUpClient();
+            topUpButton.Click += async (_, _) =>
+            {
+                await topUpClient();
+                balanceText.Text = client.BalanceText;
+                bonusText.Text = client.Bonus <= 0 ? "Нет бонусов" : client.BonusText;
+            };
 
         return new StackPanel
         {
@@ -10632,8 +12668,8 @@ public sealed class MainWindow : Window
                                     VerticalAlignment = VerticalAlignment.Center,
                                     Children =
                                     {
-                                        new TextBlock { Text = name, Foreground = Brush("#f5f7ff"), FontSize = 16, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis },
-                                        new TextBlock { Text = phone, Foreground = Brush("#8f9aad"), FontSize = 13, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis }
+                                        CopyableClientText(name, "#f5f7ff", 16, true),
+                                        CopyableClientText(phone, "#8f9aad", 13, true)
                                     }
                                 }
                             }
@@ -10648,8 +12684,8 @@ public sealed class MainWindow : Window
                             Child = new TextBlock { Text = "Клиент", Foreground = Brush("#2f8cff"), FontSize = 12, FontWeight = FontWeight.SemiBold }
                         },
                         new Border { Height = 1, Background = Brush("#303a48") },
-                        SaleMetricLine("₽", client.BalanceText),
-                        SaleMetricLine("★", client.Bonus <= 0 ? "Нет бонусов" : client.BonusText),
+                        SaleMetricLine("₽", balanceText),
+                        SaleMetricLine("★", bonusText),
                         SaleMetricLine("%", client.DiscountText),
                         editButton
                     }
@@ -10665,12 +12701,12 @@ public sealed class MainWindow : Window
     {
         return new Border
         {
-            Background = Brush("#161c23"),
+            Background = PanelBrush("#161c23", 178),
             BorderBrush = Brush("#161c23"),
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(8),
             Padding = padding,
-            Child = child
+            Child = WithDragonWatermark(child, 132, 0.045)
         };
     }
 
@@ -10872,6 +12908,11 @@ public sealed class MainWindow : Window
 
     private static Control SaleMetricLine(string icon, string text)
     {
+        return SaleMetricLine(icon, CopyableClientText(text, "#a9b2c5", 14, true));
+    }
+
+    private static Control SaleMetricLine(string icon, Control value)
+    {
         return new StackPanel
         {
             Orientation = Orientation.Horizontal,
@@ -10879,8 +12920,29 @@ public sealed class MainWindow : Window
             Children =
             {
                 new TextBlock { Text = icon, Foreground = Brush("#2f8cff"), Width = 20, FontWeight = FontWeight.SemiBold },
-                new TextBlock { Text = text, Foreground = Brush("#a9b2c5"), FontWeight = FontWeight.SemiBold }
+                value
             }
+        };
+    }
+
+    private static TextBox CopyableClientText(string text, string color, double fontSize = 14, bool bold = false, TextWrapping wrapping = TextWrapping.NoWrap)
+    {
+        return new TextBox
+        {
+            Text = text,
+            IsReadOnly = true,
+            IsTabStop = false,
+            MinHeight = 0,
+            Padding = new Thickness(0),
+            Background = Brushes.Transparent,
+            BorderBrush = Brushes.Transparent,
+            BorderThickness = new Thickness(0),
+            Foreground = Brush(color),
+            FontSize = fontSize,
+            FontWeight = bold ? FontWeight.SemiBold : FontWeight.Normal,
+            TextWrapping = wrapping,
+            SelectionBrush = Brush("#2f8cff"),
+            SelectionForegroundBrush = Brush("#ffffff")
         };
     }
 
@@ -10930,14 +12992,11 @@ public sealed class MainWindow : Window
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(6),
             Padding = new Thickness(12, 10),
-            Child = new TextBlock
-            {
-                Text = string.IsNullOrWhiteSpace(content) ? "Нет данных" : content,
-                Foreground = important ? Brush("#ffd58a") : Brush("#a9b2c5"),
-                FontSize = 12,
-                TextWrapping = TextWrapping.Wrap,
-                LineHeight = 18
-            }
+            Child = CopyableClientText(
+                string.IsNullOrWhiteSpace(content) ? "Нет данных" : content,
+                important ? "#ffd58a" : "#a9b2c5",
+                12,
+                wrapping: TextWrapping.Wrap)
         };
 
         button.Click += (_, _) =>
@@ -11215,7 +13274,7 @@ public sealed class MainWindow : Window
             return;
         }
 
-        var dialog = new Window
+        var dialog = new ModalWindow
         {
             Title = "Панель управления " + record.Name,
             Width = 920,
@@ -11379,8 +13438,6 @@ public sealed class MainWindow : Window
 
             var target = await ShowFreeHostChoiceDialogAsync(record, hosts);
             if (target == null) return;
-            if (!await ConfirmAsync("Подтвердить перенос", "Перенести сеанс с " + record.Name + " на " + target.Display + "?", false))
-                return;
 
             await service.ChangeClientSessionHostAsync(config, record.ClientSessionId, target.Id, CancellationToken.None);
             ShowToast(record.Name, "Сеанс перенесён на " + target.Display + ".");
@@ -11394,32 +13451,309 @@ public sealed class MainWindow : Window
 
     private async Task<FreeHostInfo?> ShowFreeHostChoiceDialogAsync(PcRecord record, List<FreeHostInfo> hosts)
     {
-        var dialog = new Window
+        var dialog = new ModalWindow
         {
             Title = "Смена места",
-            Width = 460,
-            Height = 420,
+            Width = 470,
+            Height = 760,
+            MinWidth = 430,
+            MinHeight = 620,
+            CanResize = false,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
-            Background = Brush("#0b1118")
+            Background = Brush("#080d12"),
+            SystemDecorations = SystemDecorations.None
         };
-        var list = new StackPanel { Spacing = 8 };
-        foreach (var host in hosts)
+
+        Control SeatCard(string alias, string? groupTitle)
         {
-            var button = GhostButton(host.Display, () => dialog.Close(host));
-            button.HorizontalContentAlignment = HorizontalAlignment.Left;
-            list.Children.Add(button);
+            var priority = new Border
+            {
+                Background = Brush("#202a37"),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(9, 4),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                Child = new TextBlock
+                {
+                    Text = "Приоритет | 0",
+                    Foreground = Brush("#9ba6b7"),
+                    FontSize = 11,
+                    FontWeight = FontWeight.SemiBold
+                }
+            };
+
+            return new Border
+            {
+                Background = Brush("#151d28"),
+                BorderBrush = Brush("#263244"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(13, 11),
+                MinHeight = 94,
+                Child = new StackPanel
+                {
+                    Spacing = 5,
+                    Children =
+                    {
+                        new TextBlock { Text = alias, Foreground = Brush("#f5f7ff"), FontSize = 16, FontWeight = FontWeight.Bold },
+                        new TextBlock { Text = string.IsNullOrWhiteSpace(groupTitle) ? "Без группы" : groupTitle, Foreground = Brush("#8f9aad"), FontSize = 13 },
+                        priority
+                    }
+                }
+            };
         }
-        dialog.Content = new StackPanel
+
+        var close = new Button
         {
-            Margin = new Thickness(22),
-            Spacing = 14,
+            Content = "×",
+            Width = 34,
+            Height = 34,
+            Padding = new Thickness(0),
+            Background = Brushes.Transparent,
+            BorderBrush = Brushes.Transparent,
+            Foreground = Brush("#f5f7ff"),
+            FontSize = 20,
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center
+        };
+        close.Click += (_, _) => dialog.Close(null);
+
+        var header = new Grid { ColumnDefinitions = new ColumnDefinitions("34,*,34") };
+        var title = new TextBlock
+        {
+            Text = "Смена места",
+            Foreground = Brush("#f5f7ff"),
+            FontSize = 19,
+            FontWeight = FontWeight.Bold,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        Grid.SetColumn(title, 1);
+        Grid.SetColumn(close, 2);
+        header.Children.Add(title);
+        header.Children.Add(close);
+
+        var clientIcon = new Border
+        {
+            Width = 46,
+            Height = 46,
+            CornerRadius = new CornerRadius(23),
+            Background = Brush("#26303d"),
+            Child = DashboardIcon("user", "#8f9aad", 21)
+        };
+        var clientDetails = new StackPanel
+        {
+            Spacing = 3,
+            VerticalAlignment = VerticalAlignment.Center,
             Children =
             {
-                new TextBlock { Text = "Куда перенести сеанс с " + record.Name + "?", Foreground = Brush("#f5f7ff"), FontSize = 20, FontWeight = FontWeight.SemiBold },
-                new ScrollViewer { Content = list, VerticalScrollBarVisibility = ScrollBarVisibility.Auto },
-                GhostButton("Отмена", () => dialog.Close(null))
+                new TextBlock
+                {
+                    Text = string.IsNullOrWhiteSpace(record.ClientName) ? "Клиент" : record.ClientName,
+                    Foreground = Brush("#f5f7ff"),
+                    FontSize = 15,
+                    FontWeight = FontWeight.Bold,
+                    TextTrimming = TextTrimming.CharacterEllipsis
+                },
+                new TextBlock
+                {
+                    Text = string.IsNullOrWhiteSpace(record.ClientPhone) ? "Телефон не указан" : record.ClientPhone,
+                    Foreground = Brush("#8f9aad"),
+                    FontSize = 13
+                }
             }
         };
+        Grid.SetColumn(clientDetails, 1);
+        var clientGrid = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), ColumnSpacing = 12 };
+        clientGrid.Children.Add(clientIcon);
+        clientGrid.Children.Add(clientDetails);
+        var clientCard = new Border
+        {
+            Background = Brush("#151d28"),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(14, 12),
+            Child = clientGrid
+        };
+
+        var targetCard = new Border
+        {
+            Background = Brush("#101720"),
+            BorderBrush = Brush("#263244"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(8),
+            MinHeight = 94,
+            Child = new TextBlock
+            {
+                Text = "Новое место\nне выбрано",
+                Foreground = Brush("#778397"),
+                FontSize = 13,
+                FontWeight = FontWeight.SemiBold,
+                TextAlignment = TextAlignment.Center,
+                TextWrapping = TextWrapping.Wrap,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            }
+        };
+        var transferGrid = new Grid { ColumnDefinitions = new ColumnDefinitions("*,42,*"), ColumnSpacing = 8 };
+        transferGrid.Children.Add(SeatCard(record.Name, record.GroupTitle));
+        var arrow = new TextBlock
+        {
+            Text = "→",
+            Foreground = Brush("#2f8cff"),
+            FontSize = 25,
+            FontWeight = FontWeight.SemiBold,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        Grid.SetColumn(arrow, 1);
+        Grid.SetColumn(targetCard, 2);
+        transferGrid.Children.Add(arrow);
+        transferGrid.Children.Add(targetCard);
+
+        var groupTitles = new List<string> { "Все группы" };
+        groupTitles.AddRange(hosts
+            .Select(x => x.GroupTitle)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.CurrentCultureIgnoreCase));
+        var groupBox = new ComboBox
+        {
+            ItemsSource = groupTitles,
+            SelectedIndex = 0,
+            Height = 44,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            Background = Brush("#151d28"),
+            Foreground = Brush("#f5f7ff"),
+            BorderBrush = Brush("#263244")
+        };
+
+        FreeHostInfo? selected = null;
+        var hostList = new StackPanel { Spacing = 8 };
+        var moveButton = new Button
+        {
+            Content = "Пересадить",
+            Height = 48,
+            IsEnabled = false,
+            Background = Brush("#232c37"),
+            BorderBrush = Brushes.Transparent,
+            Foreground = Brush("#727d8d"),
+            FontSize = 15,
+            FontWeight = FontWeight.Bold,
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center
+        };
+
+        void RebuildHostList()
+        {
+            hostList.Children.Clear();
+            var selectedGroup = groupBox.SelectedItem as string;
+            var visibleHosts = hosts.Where(x => selectedGroup == "Все группы"
+                || string.Equals(x.GroupTitle, selectedGroup, StringComparison.OrdinalIgnoreCase));
+
+            foreach (var host in visibleHosts)
+            {
+                var details = new StackPanel
+                {
+                    Spacing = 3,
+                    Children =
+                    {
+                        new TextBlock { Text = host.Alias, Foreground = Brush("#f5f7ff"), FontSize = 15, FontWeight = FontWeight.Bold },
+                        new TextBlock { Text = string.IsNullOrWhiteSpace(host.GroupTitle) ? "Без группы" : host.GroupTitle, Foreground = Brush("#8f9aad"), FontSize = 12 }
+                    }
+                };
+                var priority = new Border
+                {
+                    Background = Brush("#202a37"),
+                    CornerRadius = new CornerRadius(12),
+                    Padding = new Thickness(9, 4),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Child = new TextBlock { Text = "Приоритет | 0", Foreground = Brush("#9ba6b7"), FontSize = 11, FontWeight = FontWeight.SemiBold }
+                };
+                Grid.SetColumn(priority, 1);
+                var row = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 10 };
+                row.Children.Add(details);
+                row.Children.Add(priority);
+
+                var isSelected = selected?.Id == host.Id;
+                var hostButton = new Button
+                {
+                    Content = row,
+                    MinHeight = 70,
+                    Padding = new Thickness(13, 10),
+                    Background = Brush("#151d28"),
+                    BorderBrush = Brush(isSelected ? "#2f8cff" : "#263244"),
+                    BorderThickness = new Thickness(isSelected ? 2 : 1),
+                    HorizontalContentAlignment = HorizontalAlignment.Stretch,
+                    VerticalContentAlignment = VerticalAlignment.Center
+                };
+                hostButton.Click += (_, _) =>
+                {
+                    selected = host;
+                    targetCard.Child = SeatCard(host.Alias, host.GroupTitle);
+                    targetCard.BorderBrush = Brush("#2f8cff");
+                    moveButton.IsEnabled = true;
+                    moveButton.Background = Brush("#2f8cff");
+                    moveButton.Foreground = Brush("#ffffff");
+                    RebuildHostList();
+                };
+                hostList.Children.Add(hostButton);
+            }
+        }
+
+        groupBox.SelectionChanged += (_, _) => RebuildHostList();
+        moveButton.Click += (_, _) =>
+        {
+            if (selected != null)
+                dialog.Close(selected);
+        };
+
+        var equipmentHeader = new TextBlock
+        {
+            Text = "Доступное оборудование",
+            Foreground = Brush("#f5f7ff"),
+            FontSize = 15,
+            FontWeight = FontWeight.Bold
+        };
+        var equipmentPanel = new StackPanel
+        {
+            Spacing = 9,
+            Children = { equipmentHeader, groupBox }
+        };
+        var hostScroll = new ScrollViewer
+        {
+            Content = hostList,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto
+        };
+
+        var content = new Grid
+        {
+            RowDefinitions = new RowDefinitions("Auto,Auto,Auto,Auto,*,Auto"),
+            RowSpacing = 14
+        };
+        Grid.SetRow(clientCard, 1);
+        Grid.SetRow(transferGrid, 2);
+        Grid.SetRow(equipmentPanel, 3);
+        Grid.SetRow(hostScroll, 4);
+        Grid.SetRow(moveButton, 5);
+        content.Children.Add(header);
+        content.Children.Add(clientCard);
+        content.Children.Add(transferGrid);
+        content.Children.Add(equipmentPanel);
+        content.Children.Add(hostScroll);
+        content.Children.Add(moveButton);
+
+        dialog.Content = new Border
+        {
+            Margin = new Thickness(10),
+            Padding = new Thickness(22, 18),
+            Background = Brush("#0d1217"),
+            BorderBrush = Brush("#334052"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(14),
+            Child = content
+        };
+
+        RebuildHostList();
 
         return await dialog.ShowDialog<FreeHostInfo?>(this);
     }
@@ -11543,7 +13877,7 @@ public sealed class MainWindow : Window
             var to = DateTime.Today.AddDays(14).ToUniversalTime();
             var bookings = await service.LoadBookingsAsync(config, record.HostId, from, to, CancellationToken.None);
 
-            var dialog = new Window
+            var dialog = new ModalWindow
             {
                 Title = "Брони " + record.Name,
                 Width = 760,
@@ -11714,7 +14048,7 @@ public sealed class MainWindow : Window
     private async Task<BookingDraft?> ShowBookingDialogAsync(PcRecord record, IEnumerable<int>? initialHostIds = null, BookingInfo? existingBooking = null)
     {
         var editing = existingBooking != null;
-        var dialog = new Window
+        var dialog = new ModalWindow
         {
             Title = editing
                 ? "Редактирование брони " + record.Name
@@ -12769,7 +15103,7 @@ public sealed class MainWindow : Window
 
     private async Task<bool> ConfirmAsync(string dialogTitle, string message, bool danger)
     {
-        var dialog = new Window
+        var dialog = new ModalWindow
         {
             Title = dialogTitle,
             Width = 420,
@@ -12815,7 +15149,7 @@ public sealed class MainWindow : Window
 
     private async Task<string?> AskTextAsync(string dialogTitle, string label, string initialText = "")
     {
-        var dialog = new Window
+        var dialog = new ModalWindow
         {
             Title = dialogTitle,
             Width = 460,
@@ -12857,7 +15191,7 @@ public sealed class MainWindow : Window
 
     private async Task<string?> AskPasswordAsync(string dialogTitle, string label)
     {
-        var dialog = new Window
+        var dialog = new ModalWindow
         {
             Title = dialogTitle,
             Width = 460,
@@ -13059,6 +15393,7 @@ public sealed class MainWindow : Window
             var nextInfo = await service.LoadApiAccessInfoAsync(config, CancellationToken.None);
             apiAccessInfo = nextInfo;
             service.SaveConfig(config);
+            ApplyOperatorPalette(nextInfo);
             UpdateCleaningAuditAccess();
 
             timer.Interval = TimeSpan.FromSeconds(Math.Max(5, config.PollSeconds));
@@ -13068,6 +15403,7 @@ public sealed class MainWindow : Window
             var nextPhone = NormalizeOperatorPhone(nextInfo.Phone);
             if (previousPhone.Length > 0 && !string.Equals(previousPhone, nextPhone, StringComparison.Ordinal))
             {
+                ResetCleanedHostsForOperatorChange();
                 var message = "Новый оператор: " + nextInfo.DisplayName;
                 ShowToast("Смена оператора", message);
                 ShowWindowsNotification("Смена оператора", message);
@@ -13093,9 +15429,19 @@ public sealed class MainWindow : Window
         }
     }
 
+    private void ResetCleanedHostsForOperatorChange()
+    {
+        foreach (var record in records.Values.Where(x => x.CleaningStatus == "Убрано"))
+        {
+            record.CleaningStatus = "Нет задачи";
+            record.FreedAtUtc = null;
+            cleaningReminderMinutes.Remove(record.Name);
+        }
+    }
+
     private async Task<bool> ShowApiSettingsDialogAsync(bool firstRun)
     {
-        var dialog = new Window
+        var dialog = new ModalWindow
         {
             Title = firstRun ? "Настройка SmartShell API" : "SmartShell API",
             Width = 720,
@@ -13631,6 +15977,39 @@ public sealed class MainWindow : Window
         }
     }
 
+    private static bool HasClientAtHost(PcRecord record) =>
+        record.HasSession
+        || !string.IsNullOrWhiteSpace(record.ClientUuid)
+        || !string.IsNullOrWhiteSpace(record.ClientName)
+        || !string.IsNullOrWhiteSpace(record.ClientPhone);
+
+    private bool CompletePendingCleaningForNewClient(PcRecord record)
+    {
+        if (!TryGetPendingCleaning(record.Name, out var pending)) return false;
+
+        var cleanedAtUtc = DateTime.UtcNow;
+        var entry = FindCleaningAuditEntry(record.Name, pending.ClientLeftAtUtc);
+        if (entry == null)
+        {
+            entry = new CleaningAuditEntry
+            {
+                Operator = pending.Operator,
+                HostName = record.Name,
+                ClientLeftAtUtc = pending.ClientLeftAtUtc
+            };
+            cleaningAuditEntries.Add(entry);
+        }
+
+        entry.LastReminderAtUtc ??= pending.LastReminderAtUtc;
+        entry.CleanedAtUtc = cleanedAtUtc;
+        entry.SuspiciousReason = CleaningSuspicion(entry.ClientLeftAtUtc, cleanedAtUtc, entry.LastReminderAtUtc);
+        RemovePendingCleaning(record.Name);
+        cleaningReminderMinutes.Remove(record.Name);
+        record.CleaningStatus = "Нет задачи";
+        record.FreedAtUtc = null;
+        return true;
+    }
+
     private async Task RefreshAsync()
     {
         if (refreshInProgress) return;
@@ -13647,16 +16026,17 @@ public sealed class MainWindow : Window
             {
                 if (records.TryGetValue(record.Name, out var existing))
                 {
-                    var previousHadSession = existing.HasSession;
+                    var previousHadClient = HasClientAtHost(existing);
                     var previousCleaning = existing.CleaningStatus;
                     existing.CopyFrom(record);
+                    var hasClient = HasClientAtHost(existing);
                     if (!hostsLoadedOnce)
                     {
-                        if (record.HasSession)
+                        if (hasClient)
                         {
                             existing.CleaningStatus = "Нет задачи";
                             existing.FreedAtUtc = null;
-                            cleaningStateChanged |= RemovePendingCleaning(existing.Name);
+                            cleaningStateChanged |= CompletePendingCleaningForNewClient(existing);
                         }
                         else if (TryGetPendingCleaning(existing.Name, out var pending))
                         {
@@ -13670,7 +16050,7 @@ public sealed class MainWindow : Window
                         }
                         cleaningReminderMinutes.Remove(existing.Name);
                     }
-                    else if (previousHadSession && !record.HasSession)
+                    else if (previousHadClient && !hasClient)
                     {
                         existing.CleaningStatus = "Нужно убрать";
                         existing.FreedAtUtc = DateTime.UtcNow;
@@ -13678,11 +16058,11 @@ public sealed class MainWindow : Window
                         cleaningStateChanged = true;
                         cleaningReminderMinutes.Remove(existing.Name);
                     }
-                    else if (record.HasSession)
+                    else if (hasClient)
                     {
                         existing.CleaningStatus = "Нет задачи";
                         existing.FreedAtUtc = null;
-                        cleaningStateChanged |= RemovePendingCleaning(existing.Name);
+                        cleaningStateChanged |= CompletePendingCleaningForNewClient(existing);
                         cleaningReminderMinutes.Remove(existing.Name);
                     }
                     else if (previousCleaning == "Нужно убрать" && record.SourceStatus == "free")
@@ -13692,7 +16072,11 @@ public sealed class MainWindow : Window
                 }
                 else
                 {
-                    if (!record.HasSession && TryGetPendingCleaning(record.Name, out var pending))
+                    if (HasClientAtHost(record))
+                    {
+                        cleaningStateChanged |= CompletePendingCleaningForNewClient(record);
+                    }
+                    else if (TryGetPendingCleaning(record.Name, out var pending))
                     {
                         record.CleaningStatus = "Нужно убрать";
                         record.FreedAtUtc = pending.ClientLeftAtUtc;
@@ -13705,7 +16089,6 @@ public sealed class MainWindow : Window
             hostsLoadedOnce = true;
             await RefreshUpcomingBookingsAsync();
             await RefreshAdminCallsAsync(true);
-            selected ??= records.Values.FirstOrDefault();
             await CheckCleaningRemindersAsync();
             RefreshMap();
             if (screen == "dashboard") await RefreshDashboardAsync();
@@ -13730,8 +16113,9 @@ public sealed class MainWindow : Window
             .Where(x => selectedHostKeys.Contains(x.Name))
             .OrderBy(x => NaturalKey(x.Name))
             .ToList();
+        selected = selectedHosts.FirstOrDefault();
         var bulk = selectedHosts.Count > 1;
-        if (singleSelectionActions != null) singleSelectionActions.IsVisible = !bulk;
+        if (singleSelectionActions != null) singleSelectionActions.IsVisible = selectedHosts.Count == 1;
         if (bulkSelectionActions != null) bulkSelectionActions.IsVisible = bulk;
 
         if (bulk)
@@ -13752,6 +16136,12 @@ public sealed class MainWindow : Window
             return;
         }
 
+        if (cleanedButton != null)
+        {
+            cleanedButton.IsEnabled = NeedsCleaning(selected);
+            cleanedButton.Opacity = cleanedButton.IsEnabled ? 1 : 0.45;
+        }
+
         selectedTitle.Text = selected.Name;
         selectedBody.Text =
             "Статус: " + selected.StatusTitle + "\n" +
@@ -13766,6 +16156,10 @@ public sealed class MainWindow : Window
             "Сеансов: " + selected.ActiveSessionCount + " | Броней: " + selected.BookingCount;
     }
 
+    private bool NeedsCleaning(PcRecord record) =>
+        record.CleaningStatus == "Нужно убрать"
+        && (record.FreedAtUtc.HasValue || TryGetPendingCleaning(record.Name, out _));
+
     private async Task CheckCleaningRemindersAsync()
     {
         var auditChanged = false;
@@ -13776,9 +16170,10 @@ public sealed class MainWindow : Window
                 continue;
 
             var elapsedMinutes = (DateTime.UtcNow - record.FreedAtUtc.Value).TotalMinutes;
-            if (elapsedMinutes >= 20 && FindCleaningAuditEntry(record.Name, record.FreedAtUtc.Value) == null)
+            TryGetPendingCleaning(record.Name, out var pending);
+            var auditEntry = FindCleaningAuditEntry(record.Name, record.FreedAtUtc.Value);
+            if (auditEntry == null)
             {
-                TryGetPendingCleaning(record.Name, out var pending);
                 var operatorName = pending?.Operator ?? "";
                 if (string.IsNullOrWhiteSpace(operatorName))
                 {
@@ -13786,12 +16181,13 @@ public sealed class MainWindow : Window
                     operatorName = currentOperator;
                 }
 
-                cleaningAuditEntries.Add(new CleaningAuditEntry
+                auditEntry = new CleaningAuditEntry
                 {
                     Operator = operatorName,
                     HostName = record.Name,
                     ClientLeftAtUtc = record.FreedAtUtc.Value
-                });
+                };
+                cleaningAuditEntries.Add(auditEntry);
                 auditChanged = true;
             }
 
@@ -13808,6 +16204,10 @@ public sealed class MainWindow : Window
 
                 if (sent.Add(minute))
                 {
+                    var reminderAtUtc = DateTime.UtcNow;
+                    auditEntry.LastReminderAtUtc = reminderAtUtc;
+                    if (pending != null) pending.LastReminderAtUtc = reminderAtUtc;
+                    auditChanged = true;
                     var titleText = record.Name + " свободен " + minute + " мин";
                     var message = "Проверьте, убрано ли место.";
                     ShowToast(titleText, message);
@@ -13848,17 +16248,20 @@ public sealed class MainWindow : Window
 
     private async Task MarkSelectedCleanedAsync()
     {
-        var targets = SelectedHosts();
+        var targets = SelectedHosts().Where(NeedsCleaning).ToList();
         if (targets.Count == 0 && selected != null)
-            targets.Add(selected);
+        {
+            if (NeedsCleaning(selected))
+                targets.Add(selected);
+        }
         if (targets.Count == 0)
         {
-            ShowToast("Уборка", "Сначала выберите ПК.");
+            ShowToast("Уборка", "Для выбранных ПК уборка не требуется.");
             return;
         }
 
         var cleanedAtUtc = DateTime.UtcNow;
-        var overdue = new List<(PcRecord Target, DateTime ClientLeftAtUtc, string Operator, CleaningAuditEntry? Entry)>();
+        var audits = new List<(PcRecord Target, DateTime ClientLeftAtUtc, PendingCleaningAudit? Pending, CleaningAuditEntry? Entry)>();
         foreach (var target in targets)
         {
             PendingCleaningAudit? pendingAudit = null;
@@ -13867,17 +16270,17 @@ public sealed class MainWindow : Window
             DateTime? clientLeftAtUtc = target.FreedAtUtc;
             if (!clientLeftAtUtc.HasValue)
                 clientLeftAtUtc = pendingAudit?.ClientLeftAtUtc;
-            if (clientLeftAtUtc.HasValue && cleanedAtUtc - clientLeftAtUtc.Value > TimeSpan.FromMinutes(20))
-                overdue.Add((target, clientLeftAtUtc.Value, pendingAudit?.Operator ?? "",
+            if (clientLeftAtUtc.HasValue)
+                audits.Add((target, clientLeftAtUtc.Value, pendingAudit,
                     FindCleaningAuditEntry(target.Name, clientLeftAtUtc.Value)));
         }
 
         static bool OperatorMissing(string? value) => string.IsNullOrWhiteSpace(value)
             || string.Equals(value, "Оператор не определён", StringComparison.OrdinalIgnoreCase);
-        var operatorName = overdue.Any(x => OperatorMissing(x.Entry?.Operator) && OperatorMissing(x.Operator))
+        var operatorName = audits.Any(x => OperatorMissing(x.Entry?.Operator) && OperatorMissing(x.Pending?.Operator))
             ? await LoadCurrentCleaningOperatorAsync()
             : "";
-        foreach (var item in overdue)
+        foreach (var item in audits)
         {
             var entry = item.Entry;
             if (entry == null)
@@ -13891,8 +16294,10 @@ public sealed class MainWindow : Window
             }
 
             if (OperatorMissing(entry.Operator))
-                entry.Operator = OperatorMissing(item.Operator) ? operatorName : item.Operator;
+                entry.Operator = OperatorMissing(item.Pending?.Operator) ? operatorName : item.Pending!.Operator;
+            entry.LastReminderAtUtc ??= item.Pending?.LastReminderAtUtc;
             entry.CleanedAtUtc = cleanedAtUtc;
+            entry.SuspiciousReason = CleaningSuspicion(item.ClientLeftAtUtc, cleanedAtUtc, entry.LastReminderAtUtc);
         }
 
         foreach (var target in targets)
@@ -14159,38 +16564,53 @@ public sealed class MainWindow : Window
 
     private static IBrush StatusBrush(PcRecord record)
     {
-        if (IsConnectionLost(record)) return Brush("#ff3b4d");
-        if (record.HasSession) return Brush("#8b5cf6");
-        if (IsShellDisabled(record)) return Brush("#ff4d4f");
-        if (IsServiceMode(record)) return Brush("#f5a524");
-        if (HasLoggedInClient(record)) return Brush("#17c964");
-        if (record.CleaningStatus == "Убрано") return Brush("#17c964");
-        if (record.Online || record.SourceStatus == "free") return Brush("#2f8cff");
+        if (IsConnectionLost(record)) return Brush(UiLabAppearance.PcConnectionLost);
+        if (record.HasSession) return Brush(UiLabAppearance.PcSession);
+        if (IsShellDisabled(record)) return Brush(UiLabAppearance.PcShellOff);
+        if (IsServiceMode(record)) return Brush(UiLabAppearance.PcService);
+        if (HasLoggedInClient(record)) return Brush(UiLabAppearance.PcLoggedIn);
+        if (record.CleaningStatus == "Убрано") return Brush(UiLabAppearance.PcCleaned);
+        if (record.Online || record.SourceStatus == "free") return Brush(UiLabAppearance.PcFree);
 
         return record.SourceStatus switch
         {
-            "service" => Brush("#f5a524"),
-            "locked" => Brush("#ff4d4f"),
-            _ => Brush("#667085")
+            "service" => Brush(UiLabAppearance.PcService),
+            "locked" => Brush(UiLabAppearance.PcShellOff),
+            _ => Brush(UiLabAppearance.PcOffline)
         };
     }
 
     private static IBrush StatusFill(PcRecord record)
     {
-        if (IsConnectionLost(record)) return Brush("#2b1118");
-        if (record.HasSession) return Brush("#21153b");
-        if (IsShellDisabled(record)) return Brush("#2b1217");
-        if (IsServiceMode(record)) return Brush("#2b2110");
-        if (HasLoggedInClient(record)) return Brush("#0b2b1b");
-        if (record.CleaningStatus == "Убрано") return Brush("#0b2b1b");
-        if (record.Online || record.SourceStatus == "free") return Brush("#0d2038");
+        if (IsConnectionLost(record)) return StatusTint(UiLabAppearance.PcConnectionLost);
+        if (record.HasSession) return StatusTint(UiLabAppearance.PcSession);
+        if (IsShellDisabled(record)) return StatusTint(UiLabAppearance.PcShellOff);
+        if (IsServiceMode(record)) return StatusTint(UiLabAppearance.PcService);
+        if (HasLoggedInClient(record)) return StatusTint(UiLabAppearance.PcLoggedIn);
+        if (record.CleaningStatus == "Убрано") return StatusTint(UiLabAppearance.PcCleaned);
+        if (record.Online || record.SourceStatus == "free") return StatusTint(UiLabAppearance.PcFree);
 
         return record.SourceStatus switch
         {
-            "service" => Brush("#2b2110"),
-            "locked" => Brush("#2b1217"),
-            _ => Brush("#141b24")
+            "service" => StatusTint(UiLabAppearance.PcService),
+            "locked" => StatusTint(UiLabAppearance.PcShellOff),
+            _ => StatusTint(UiLabAppearance.PcOffline)
         };
+    }
+
+    private static IBrush StatusTint(string hex)
+    {
+        var color = Color.Parse(hex);
+        if (UiLabAppearance.HasDragonMotif)
+        {
+            var surface = Color.Parse(UiLabAppearance.Resolve("#111820"));
+            return new SolidColorBrush(Color.FromArgb(
+                224,
+                (byte)(surface.R * 0.78 + color.R * 0.22),
+                (byte)(surface.G * 0.78 + color.G * 0.22),
+                (byte)(surface.B * 0.78 + color.B * 0.22)));
+        }
+        return new SolidColorBrush(Color.FromArgb(46, color.R, color.G, color.B));
     }
 
     private static bool IsConnectionLost(PcRecord record)
@@ -14240,16 +16660,40 @@ public sealed class MainWindow : Window
 
     private static SolidColorBrush Brush(string hex)
     {
-        return hex.ToLowerInvariant() switch
+        var key = hex.ToLowerInvariant();
+        var accent = key switch
         {
             "#2f8cff" => PrimaryAccent,
             "#4ea1ff" => BrightAccent,
             "#102a4d" => DeepAccent,
             "#16243a" => SoftAccent,
             "#24466f" => AccentBorder,
-            _ => new SolidColorBrush(Color.Parse(hex))
+            _ => null
         };
+        if (accent != null) return accent;
+
+        if (!ThemeBrushes.TryGetValue(key, out var brush))
+        {
+            brush = new SolidColorBrush(ResolvedThemeColor(key));
+            ThemeBrushes[key] = brush;
+        }
+        return brush;
     }
+
+    private static Color ResolvedThemeColor(string key)
+    {
+        return Color.Parse(UiLabAppearance.Resolve(key));
+    }
+
+    private static SolidColorBrush PanelBrush(string hex, byte alpha)
+    {
+        if (!UiLabAppearance.HasDragonMotif) return Brush(hex);
+        var color = Color.Parse(UiLabAppearance.Resolve(hex));
+        return new SolidColorBrush(Color.FromArgb(alpha, color.R, color.G, color.B));
+    }
+
+    private static IBrush PageBackground() =>
+        UiLabAppearance.HasDragonMotif ? Brushes.Transparent : Brush("#080d12");
 
     private static Dictionary<string, Point> BuildLayout()
     {
