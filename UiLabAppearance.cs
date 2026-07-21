@@ -34,7 +34,11 @@ internal sealed record UiCustomPalette(
     string PcShellOff = "#ff4d4f",
     string PcConnectionLost = "#ff3b4d",
     string PcOffline = "#667085",
-    string Motif = "");
+    string Motif = "",
+    string BackgroundImage = "",
+    double BackgroundOpacity = 0,
+    double PanelOpacity = 1,
+    double PcCardOpacity = -1);
 
 internal sealed record UiSavedPalette(string Name, UiCustomPalette Palette);
 
@@ -88,6 +92,13 @@ internal static class UiLabAppearance
     public static string PcShellOff => CustomPalette?.PcShellOff ?? "#ff4d4f";
     public static string PcConnectionLost => CustomPalette?.PcConnectionLost ?? "#ff3b4d";
     public static string PcOffline => CustomPalette?.PcOffline ?? "#667085";
+    public static string BackgroundImage => CustomPalette?.BackgroundImage ?? "";
+    public static double BackgroundOpacity => Math.Clamp(CustomPalette?.BackgroundOpacity ?? 0, 0, 1);
+    public static double PanelOpacity => Math.Clamp(CustomPalette?.PanelOpacity ?? 1, 0.08, 1);
+    public static double PcCardOpacity => CustomPalette is { PcCardOpacity: >= 0 and <= 1 } palette
+        ? palette.PcCardOpacity
+        : HasDragonMotif ? 224d / 255 : 46d / 255;
+    public static bool HasBackdrop => !string.IsNullOrWhiteSpace(BackgroundImage);
     public static string ActivePaletteName => Settings.ActivePaletteName;
     public static string ActiveMotif => CustomPalette?.Motif
                                         ?? Settings.SavedPalettes.FirstOrDefault(x => x.Name.Equals(Settings.ActivePaletteName, StringComparison.OrdinalIgnoreCase))?.Palette.Motif
@@ -305,6 +316,7 @@ internal static class UiLabAppearance
 
     private static bool EnsurePersonalPalettes(AppearanceSettings settings)
     {
+        var changed = false;
         var rodionPalette = new UiCustomPalette(
             Accent: "#e11d8d",
             Background: "#070208",
@@ -323,18 +335,40 @@ internal static class UiLabAppearance
             PcShellOff: "#ff4d4f",
             PcConnectionLost: "#ff1744",
             PcOffline: "#667085",
-            Motif: "dragon");
+            Motif: "dragon",
+            BackgroundImage: "avares://SmartShellCleaner.Avalonia/Assets/rodion-dragon-night-art.png",
+            BackgroundOpacity: 0.22,
+            PanelOpacity: 0.74);
         var rodionIndex = settings.SavedPalettes.FindIndex(x => x.Name.Equals("Родион", StringComparison.OrdinalIgnoreCase));
         var legacyRodionPalette = rodionIndex >= 0
                                   && settings.SavedPalettes[rodionIndex].Palette.Accent.Equals("#9D4EDD", StringComparison.OrdinalIgnoreCase)
                                   && settings.SavedPalettes[rodionIndex].Palette.Background.Equals("#07030D", StringComparison.OrdinalIgnoreCase);
-        var changed = false;
         if (rodionIndex < 0 || legacyRodionPalette)
         {
             if (rodionIndex < 0)
                 settings.SavedPalettes.Add(new UiSavedPalette("Родион", rodionPalette));
             else
                 settings.SavedPalettes[rodionIndex] = new UiSavedPalette("Родион", rodionPalette);
+            changed = true;
+        }
+
+        if (settings.AppearanceVersion < 1)
+        {
+            var migrationIndex = settings.SavedPalettes.FindIndex(x => x.Name.Equals("Родион", StringComparison.OrdinalIgnoreCase));
+            if (migrationIndex >= 0)
+            {
+                var saved = settings.SavedPalettes[migrationIndex];
+                var migrated = saved.Palette with
+                {
+                    BackgroundImage = rodionPalette.BackgroundImage,
+                    BackgroundOpacity = rodionPalette.BackgroundOpacity,
+                    PanelOpacity = rodionPalette.PanelOpacity
+                };
+                settings.SavedPalettes[migrationIndex] = saved with { Palette = migrated };
+                if (settings.ActivePaletteName.Equals("Родион", StringComparison.OrdinalIgnoreCase))
+                    settings.Palette = migrated;
+            }
+            settings.AppearanceVersion = 1;
             changed = true;
         }
 
@@ -503,5 +537,6 @@ internal static class UiLabAppearance
         public string ActivePaletteName { get; set; } = "";
         public string Motif { get; set; } = "";
         public List<UiSavedPalette> SavedPalettes { get; set; } = [];
+        public int AppearanceVersion { get; set; }
     }
 }

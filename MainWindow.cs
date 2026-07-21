@@ -6,6 +6,7 @@ using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform;
+using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using System.Diagnostics;
@@ -82,6 +83,8 @@ public sealed class MainWindow : Window
     private static readonly SolidColorBrush SoftAccent = new(Color.Parse(UiLabAppearance.EffectiveSoftAccent));
     private static readonly SolidColorBrush AccentBorder = new(Color.Parse(UiLabAppearance.EffectiveAccentBorder));
     private static readonly Dictionary<string, SolidColorBrush> ThemeBrushes = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly List<(string Key, SolidColorBrush Brush)> ThemePanelBrushes = new();
+    private static readonly Dictionary<string, AvaloniaBitmap?> ThemeBackgroundArtworks = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Lazy<AvaloniaBitmap?> DragonArtwork = new(() => LoadDragonArtwork("dragon-winged-cc0.png"));
     private static readonly Lazy<AvaloniaBitmap?> DragonHeadArtwork = new(() => LoadDragonArtwork("dragon-head-cc0.png"));
     private static readonly Lazy<AvaloniaBitmap?> DragonFlamesArtwork = new(() => LoadDragonArtwork("dragon-flames-cc0.png"));
@@ -146,10 +149,13 @@ public sealed class MainWindow : Window
     {
         Width = 960,
         Height = 700,
-        Background = UiLabAppearance.HasDragonMotif ? Brushes.Transparent : Brush("#080d12")
+        Background = UiLabAppearance.HasBackdrop ? Brushes.Transparent : Brush("#080d12")
     };
+    private AvaloniaImage? themeBackdropImage;
     private TransitioningContentControl contentHost = CreateContentHost();
     private Border sidePanel = new();
+    private ColumnDefinition? inspectorColumn;
+    private double currentInspectorWidth = 320;
     private StackPanel toastHost = new();
     private readonly System.Windows.Forms.NotifyIcon windowsNotifier = new();
     private readonly List<PsTimerSession> psTimers = new();
@@ -368,13 +374,15 @@ public sealed class MainWindow : Window
                 : new RowDefinitions($"{headerHeight},*"),
             Background = Brush("#080d12")
         };
+        currentInspectorWidth = inspectorWidth;
+        inspectorColumn = root.ColumnDefinitions[^1];
 
-        if (UiLabAppearance.HasDragonMotif)
+        if (UiLabAppearance.HasBackdrop)
         {
-            var dragonBackdrop = BuildDragonBackdrop();
-            Grid.SetRowSpan(dragonBackdrop, topNavigation ? 3 : 2);
-            Grid.SetColumnSpan(dragonBackdrop, topNavigation ? 2 : 3);
-            root.Children.Add(dragonBackdrop);
+            var backdrop = BuildThemeBackdrop();
+            Grid.SetRowSpan(backdrop, topNavigation ? 3 : 2);
+            Grid.SetColumnSpan(backdrop, topNavigation ? 2 : 3);
+            root.Children.Add(backdrop);
         }
 
         var sidebar = BuildSidebar();
@@ -1708,8 +1716,16 @@ public sealed class MainWindow : Window
         AccentBorder.Color = Color.Parse(UiLabAppearance.EffectiveAccentBorder);
         foreach (var pair in ThemeBrushes)
             pair.Value.Color = ResolvedThemeColor(pair.Key);
+        var panelAlpha = (byte)Math.Round(255 * UiLabAppearance.PanelOpacity);
+        foreach (var pair in ThemePanelBrushes)
+        {
+            var color = ResolvedThemeColor(pair.Key);
+            pair.Brush.Color = Color.FromArgb(panelAlpha, color.R, color.G, color.B);
+        }
+        if (themeBackdropImage != null)
+            themeBackdropImage.Opacity = UiLabAppearance.BackgroundOpacity;
         Background = Brush("#080d12");
-        mapCanvas.Background = UiLabAppearance.HasDragonMotif ? Brushes.Transparent : Brush("#080d12");
+        mapCanvas.Background = UiLabAppearance.HasBackdrop ? Brushes.Transparent : Brush("#080d12");
     }
 
     private void RebuildShell()
@@ -1728,6 +1744,8 @@ public sealed class MainWindow : Window
         sidePanel.Child = null;
         Content = null;
         navButtons.Clear();
+        ThemePanelBrushes.Clear();
+        themeBackdropImage = null;
 
         title = new TextBlock();
         source = new TextBlock { Text = sourceText };
@@ -1763,6 +1781,18 @@ public sealed class MainWindow : Window
         var custom = UiLabAppearance.CustomPalette;
         var originalPalette = custom;
         var motif = UiLabAppearance.ActiveMotif;
+        var backgroundImage = custom?.BackgroundImage ?? "";
+        var backgroundOpacity = custom?.BackgroundOpacity ?? 0;
+        var panelOpacity = custom?.PanelOpacity ?? 1;
+        var pcCardOpacity = UiLabAppearance.PcCardOpacity;
+        Slider? backgroundOpacitySlider = null;
+        Slider? panelTransparencySlider = null;
+        Slider? pcCardTransparencySlider = null;
+        TextBlock? backgroundFileText = null;
+        TextBlock? backgroundOpacityText = null;
+        TextBlock? panelTransparencyText = null;
+        TextBlock? pcCardTransparencyText = null;
+        var updatingBackdropControls = false;
         var colors = new Dictionary<string, Color>(StringComparer.OrdinalIgnoreCase)
         {
             ["accent"] = Color.Parse(custom?.Accent ?? preset.Accent),
@@ -1841,7 +1871,11 @@ public sealed class MainWindow : Window
             ToHex(colors["pcShellOff"]),
             ToHex(colors["pcConnectionLost"]),
             ToHex(colors["pcOffline"]),
-            motif);
+            motif,
+            backgroundImage,
+            backgroundOpacity,
+            panelOpacity,
+            pcCardOpacity);
 
         void ApplyPalette(UiCustomPalette palette)
         {
@@ -1863,6 +1897,12 @@ public sealed class MainWindow : Window
             colors["pcConnectionLost"] = Color.Parse(palette.PcConnectionLost);
             colors["pcOffline"] = Color.Parse(palette.PcOffline);
             motif = palette.Motif;
+            backgroundImage = palette.BackgroundImage;
+            backgroundOpacity = palette.BackgroundOpacity;
+            panelOpacity = palette.PanelOpacity;
+            pcCardOpacity = palette.PcCardOpacity is >= 0 and <= 1
+                ? palette.PcCardOpacity
+                : palette.Motif.Equals("dragon", StringComparison.OrdinalIgnoreCase) ? 224d / 255 : 46d / 255;
         }
 
         void RenderStatusPreviews()
@@ -1871,7 +1911,8 @@ public sealed class MainWindow : Window
             {
                 var color = colors[pair.Key];
                 pair.Value.BorderBrush = new SolidColorBrush(color);
-                pair.Value.Background = new SolidColorBrush(Color.FromArgb(46, color.R, color.G, color.B));
+                pair.Value.Background = new SolidColorBrush(Color.FromArgb(
+                    (byte)Math.Round(255 * pcCardOpacity), color.R, color.G, color.B));
                 statusPreviewLabels[pair.Key].Foreground = new SolidColorBrush(color);
             }
         }
@@ -2134,19 +2175,22 @@ public sealed class MainWindow : Window
         Grid.SetColumn(statusGroupButton, 2);
         var paletteLeft = new StackPanel { Spacing = 10, Children = { groupTabs, paletteList } };
 
+        var dialog = new ModalWindow
+        {
+            Title = "Палитра интерфейса",
+            Width = 1480,
+            Height = 1000,
+            MinWidth = 1100,
+            MinHeight = 780,
+            CanResize = true,
+            SystemDecorations = SystemDecorations.None,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Background = Brush("#080d12")
+        };
+
         var savedPaletteBox = new ComboBox
         {
             Height = 40,
-            Background = Brush("#182231"),
-            Foreground = Brush("#f5f7ff"),
-            BorderBrush = Brush("#2b3550"),
-            Padding = new Thickness(10, 0),
-            VerticalContentAlignment = VerticalAlignment.Center
-        };
-        var paletteNameBox = new TextBox
-        {
-            Height = 40,
-            Watermark = "Название палитры",
             Background = Brush("#182231"),
             Foreground = Brush("#f5f7ff"),
             BorderBrush = Brush("#2b3550"),
@@ -2161,6 +2205,27 @@ public sealed class MainWindow : Window
             TextTrimming = TextTrimming.CharacterEllipsis
         };
         var refreshingSavedPaletteSelection = false;
+        var activePaletteName = UiLabAppearance.ActivePaletteName;
+        void RefreshBackdropControls()
+        {
+            if (backgroundOpacitySlider == null || panelTransparencySlider == null || pcCardTransparencySlider == null ||
+                backgroundFileText == null || backgroundOpacityText == null || panelTransparencyText == null ||
+                pcCardTransparencyText == null)
+                return;
+            updatingBackdropControls = true;
+            backgroundOpacitySlider.Value = Math.Round(backgroundOpacity * 100);
+            panelTransparencySlider.Value = Math.Round((1 - panelOpacity) * 100);
+            pcCardTransparencySlider.Value = Math.Round((1 - pcCardOpacity) * 100);
+            backgroundFileText.Text = string.IsNullOrWhiteSpace(backgroundImage)
+                ? "Фон не выбран"
+                : backgroundImage.StartsWith("avares://", StringComparison.OrdinalIgnoreCase)
+                    ? "Встроенный фон темы"
+                    : Path.GetFileName(backgroundImage);
+            backgroundOpacityText.Text = $"Видимость фона: {backgroundOpacitySlider.Value:0}%";
+            panelTransparencyText.Text = $"Прозрачность панелей: {panelTransparencySlider.Value:0}%";
+            pcCardTransparencyText.Text = $"Прозрачность карточек ПК: {pcCardTransparencySlider.Value:0}%";
+            updatingBackdropControls = false;
+        }
         void RefreshSavedPalettes(string? selectedName = null)
         {
             refreshingSavedPaletteSelection = true;
@@ -2172,20 +2237,6 @@ public sealed class MainWindow : Window
                 savedPaletteBox.SelectedItem = names.FirstOrDefault(x => x.Equals(UiLabAppearance.ActivePaletteName, StringComparison.OrdinalIgnoreCase));
             refreshingSavedPaletteSelection = false;
         }
-        Button SavedPaletteButton(string text) => new()
-        {
-            Content = text,
-            Height = 40,
-            Padding = new Thickness(12, 0),
-            Background = Brush("#182231"),
-            Foreground = Brush("#f5f7ff"),
-            BorderBrush = Brush("#2b3550"),
-            HorizontalContentAlignment = HorizontalAlignment.Center,
-            VerticalContentAlignment = VerticalAlignment.Center
-        };
-        var loadNamedPalette = SavedPaletteButton("Загрузить");
-        var saveNamedPalette = SavedPaletteButton("Сохранить как");
-        var deleteNamedPalette = SavedPaletteButton("Удалить");
         void ActivateSavedPalette(string name)
         {
             var saved = UiLabAppearance.SavedPalettes.FirstOrDefault(x => x.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
@@ -2193,80 +2244,255 @@ public sealed class MainWindow : Window
             ApplyPalette(saved.Palette);
             UiLabAppearance.ActivateNamedPalette(name);
             originalPalette = saved.Palette;
+            RefreshBackdropControls();
             RenderPaletteGroup(showingGroup);
             ApplyAppearanceBrushes();
             Dispatcher.UIThread.Post(RebuildShell);
-            savedPaletteStatus.Text = "Палитра загружена";
+            activePaletteName = saved.Name;
+            savedPaletteStatus.Text = "Активна: " + saved.Name;
         }
-        savedPaletteBox.SelectionChanged += (_, _) =>
+
+        async Task<bool> ConfirmPaletteSwitchAsync(string name)
         {
-            if (savedPaletteBox.SelectedItem is string name)
+            var confirmation = new ModalWindow
             {
-                paletteNameBox.Text = name;
-                if (!refreshingSavedPaletteSelection)
-                    ActivateSavedPalette(name);
-            }
-        };
-        loadNamedPalette.Click += (_, _) =>
-        {
-            if (savedPaletteBox.SelectedItem is not string name) return;
-            ActivateSavedPalette(name);
-        };
-        saveNamedPalette.Click += (_, _) =>
-        {
-            var name = paletteNameBox.Text?.Trim() ?? "";
-            if (name.Length == 0)
+                Title = "Смена темы",
+                Width = 500,
+                Height = 230,
+                CanResize = false,
+                SystemDecorations = SystemDecorations.None,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Background = Brush("#0d1217")
+            };
+            var yes = AccentButton("Переключить", () => confirmation.Close(true));
+            var no = GhostButton("Остаться", () => confirmation.Close(false));
+            var close = GhostButton("×", () => confirmation.Close(false));
+            close.Width = 42;
+            close.Height = 42;
+            var header = new Grid
             {
-                savedPaletteStatus.Text = "Укажите название";
+                Height = 48,
+                ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+                Background = Brush("#111820"),
+                Children =
+                {
+                    new TextBlock
+                    {
+                        Text = "Смена темы",
+                        Margin = new Thickness(18, 0),
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Foreground = Brush("#f5f7ff"),
+                        FontWeight = FontWeight.SemiBold
+                    },
+                    close
+                }
+            };
+            Grid.SetColumn(close, 1);
+            header.PointerPressed += (_, e) =>
+            {
+                if (e.Source is Button || (e.Source as Control)?.FindAncestorOfType<Button>() != null) return;
+                if (e.GetCurrentPoint(header).Properties.IsLeftButtonPressed) confirmation.BeginMoveDrag(e);
+            };
+            var actions = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Spacing = 8,
+                Children = { no, yes }
+            };
+            var content = new StackPanel
+            {
+                Margin = new Thickness(20),
+                Spacing = 18,
+                Children =
+                {
+                    new TextBlock
+                    {
+                        Text = $"Переключить тему на «{name}»? Несохранённые изменения текущей темы будут отменены.",
+                        Foreground = Brush("#c9d3e6"),
+                        TextWrapping = TextWrapping.Wrap
+                    },
+                    actions
+                }
+            };
+            var root = new Grid { RowDefinitions = new RowDefinitions("48,*"), Children = { header, content } };
+            Grid.SetRow(content, 1);
+            confirmation.Content = root;
+            return await confirmation.ShowDialog<bool>(dialog);
+        }
+
+        savedPaletteBox.SelectionChanged += async (_, _) =>
+        {
+            if (refreshingSavedPaletteSelection || savedPaletteBox.SelectedItem is not string name ||
+                name.Equals(activePaletteName, StringComparison.OrdinalIgnoreCase))
+                return;
+            if (!await ConfirmPaletteSwitchAsync(name))
+            {
+                RefreshSavedPalettes(activePaletteName);
                 return;
             }
-            var palette = CurrentPalette();
-            UiLabAppearance.SaveNamedPalette(name, palette);
-            var saved = UiLabAppearance.SavedPalettes.First(x => x.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
-            ApplyPalette(saved.Palette);
-            originalPalette = saved.Palette;
-            RefreshSavedPalettes(name);
-            ApplyAppearanceBrushes();
-            Dispatcher.UIThread.Post(RebuildShell);
-            savedPaletteStatus.Text = "Палитра сохранена";
+            ActivateSavedPalette(name);
         };
-        deleteNamedPalette.Click += (_, _) =>
+
+        var savedPaletteLabel = new TextBlock
         {
-            if (savedPaletteBox.SelectedItem is not string name) return;
-            UiLabAppearance.DeleteNamedPalette(name);
-            paletteNameBox.Text = "";
-            RefreshSavedPalettes();
-            ApplyAppearanceBrushes();
-            Dispatcher.UIThread.Post(RebuildShell);
-            savedPaletteStatus.Text = "Палитра удалена";
+            Text = "Сохранённая тема",
+            Foreground = Brush("#f5f7ff"),
+            FontWeight = FontWeight.SemiBold,
+            VerticalAlignment = VerticalAlignment.Center
         };
         var savedPaletteBar = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions("230,210,100,130,90,*"),
-            ColumnSpacing = 8,
-            Children = { savedPaletteBox, paletteNameBox, loadNamedPalette, saveNamedPalette, deleteNamedPalette, savedPaletteStatus }
+            ColumnDefinitions = new ColumnDefinitions("Auto,320,*"),
+            ColumnSpacing = 12,
+            Children = { savedPaletteLabel, savedPaletteBox, savedPaletteStatus }
         };
-        Grid.SetColumn(paletteNameBox, 1);
-        Grid.SetColumn(loadNamedPalette, 2);
-        Grid.SetColumn(saveNamedPalette, 3);
-        Grid.SetColumn(deleteNamedPalette, 4);
-        Grid.SetColumn(savedPaletteStatus, 5);
+        Grid.SetColumn(savedPaletteBox, 1);
+        Grid.SetColumn(savedPaletteStatus, 2);
         RefreshSavedPalettes();
+        savedPaletteStatus.Text = activePaletteName.Length == 0 ? "Активна базовая палитра" : "Активна: " + activePaletteName;
 
-        var dialog = new ModalWindow
+        Button BackdropButton(string text) => new()
         {
-            Title = "Палитра интерфейса",
-            Width = 1160,
-            Height = 860,
-            MinWidth = 980,
-            MinHeight = 720,
-            CanResize = true,
-            WindowStartupLocation = WindowStartupLocation.CenterOwner,
-            Background = Brush("#080d12")
+            Content = text,
+            Height = 38,
+            Padding = new Thickness(14, 0),
+            Background = Brush("#182231"),
+            Foreground = Brush("#f5f7ff"),
+            BorderBrush = Brush("#2b3550"),
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center
+        };
+        backgroundFileText = new TextBlock
+        {
+            Foreground = Brush("#c9d3e6"),
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis
+        };
+        backgroundOpacityText = new TextBlock { Foreground = Brush("#a9b2c5"), FontSize = 12 };
+        panelTransparencyText = new TextBlock { Foreground = Brush("#a9b2c5"), FontSize = 12 };
+        pcCardTransparencyText = new TextBlock { Foreground = Brush("#a9b2c5"), FontSize = 12 };
+        backgroundOpacitySlider = new Slider { Minimum = 0, Maximum = 100, Height = 30 };
+        panelTransparencySlider = new Slider { Minimum = 0, Maximum = 92, Height = 30 };
+        pcCardTransparencySlider = new Slider { Minimum = 0, Maximum = 92, Height = 30 };
+        var chooseBackground = BackdropButton("Выбрать фон");
+        var removeBackground = BackdropButton("Убрать фон");
+
+        void PreviewBackdrop(bool rebuild)
+        {
+            UiLabAppearance.PreviewCustomPalette(CurrentPalette());
+            ApplyAppearanceBrushes();
+            if (rebuild)
+                Dispatcher.UIThread.Post(RebuildShell);
+        }
+
+        chooseBackground.Click += async (_, _) =>
+        {
+            var files = await dialog.StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+            {
+                Title = "Выберите фоновое изображение",
+                AllowMultiple = false,
+                FileTypeFilter =
+                [
+                    new FilePickerFileType("Изображения")
+                    {
+                        Patterns = ["*.png", "*.jpg", "*.jpeg", "*.webp", "*.bmp"]
+                    }
+                ]
+            });
+            var file = files.FirstOrDefault();
+            if (file == null) return;
+            backgroundImage = file.Path.LocalPath;
+            if (backgroundOpacity <= 0) backgroundOpacity = 0.24;
+            RefreshBackdropControls();
+            PreviewBackdrop(true);
+        };
+        removeBackground.Click += (_, _) =>
+        {
+            backgroundImage = "";
+            backgroundOpacity = 0;
+            RefreshBackdropControls();
+            PreviewBackdrop(true);
+        };
+        backgroundOpacitySlider.ValueChanged += (_, _) =>
+        {
+            if (updatingBackdropControls) return;
+            backgroundOpacity = backgroundOpacitySlider.Value / 100;
+            backgroundOpacityText.Text = $"Видимость фона: {backgroundOpacitySlider.Value:0}%";
+            PreviewBackdrop(false);
+        };
+        panelTransparencySlider.ValueChanged += (_, _) =>
+        {
+            if (updatingBackdropControls) return;
+            panelOpacity = 1 - panelTransparencySlider.Value / 100;
+            panelTransparencyText.Text = $"Прозрачность панелей: {panelTransparencySlider.Value:0}%";
+            PreviewBackdrop(false);
+        };
+        pcCardTransparencySlider.ValueChanged += (_, _) =>
+        {
+            if (updatingBackdropControls) return;
+            pcCardOpacity = 1 - pcCardTransparencySlider.Value / 100;
+            pcCardTransparencyText.Text = $"Прозрачность карточек ПК: {pcCardTransparencySlider.Value:0}%";
+            UiLabAppearance.PreviewCustomPalette(CurrentPalette());
+            RenderStatusPreviews();
+            if (screen == "map") RefreshMap();
+        };
+        RefreshBackdropControls();
+
+        var backgroundActions = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"),
+            ColumnSpacing = 8,
+            Children = { backgroundFileText, chooseBackground, removeBackground }
+        };
+        Grid.SetColumn(chooseBackground, 1);
+        Grid.SetColumn(removeBackground, 2);
+        var opacityControls = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,*,*"),
+            ColumnSpacing = 24
+        };
+        var backgroundOpacityControl = new StackPanel
+        {
+            Spacing = 2,
+            Children = { backgroundOpacityText, backgroundOpacitySlider }
+        };
+        var panelOpacityControl = new StackPanel
+        {
+            Spacing = 2,
+            Children = { panelTransparencyText, panelTransparencySlider }
+        };
+        var pcCardOpacityControl = new StackPanel
+        {
+            Spacing = 2,
+            Children = { pcCardTransparencyText, pcCardTransparencySlider }
+        };
+        opacityControls.Children.Add(backgroundOpacityControl);
+        Grid.SetColumn(panelOpacityControl, 1);
+        opacityControls.Children.Add(panelOpacityControl);
+        Grid.SetColumn(pcCardOpacityControl, 2);
+        opacityControls.Children.Add(pcCardOpacityControl);
+        var backdropSettings = new Border
+        {
+            Background = Brush("#111820"),
+            BorderBrush = Brush("#263244"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(14, 10),
+            Child = new StackPanel
+            {
+                Spacing = 8,
+                Children =
+                {
+                    new TextBlock { Text = "Фон и прозрачность", Foreground = Brush("#f5f7ff"), FontWeight = FontWeight.SemiBold },
+                    backgroundActions,
+                    opacityControls
+                }
+            }
         };
         var save = new Button
         {
-            Content = "Сохранить палитру",
+            Content = "Сохранить активную тему",
             Height = 42,
             Padding = new Thickness(18, 0),
             Background = PrimaryAccent,
@@ -2298,7 +2524,12 @@ public sealed class MainWindow : Window
         };
         save.Click += (_, _) =>
         {
-            UiLabAppearance.SetCustomPalette(CurrentPalette());
+            var palette = CurrentPalette();
+            if (activePaletteName.Length == 0)
+                UiLabAppearance.SetCustomPalette(palette);
+            else
+                UiLabAppearance.SaveNamedPalette(activePaletteName, palette);
+            originalPalette = UiLabAppearance.CustomPalette;
             paletteCommitted = true;
             dialog.Close();
             ApplyAppearanceBrushes();
@@ -2306,11 +2537,19 @@ public sealed class MainWindow : Window
         };
         reset.Click += (_, _) =>
         {
-            UiLabAppearance.ResetCustomPalette();
-            paletteCommitted = true;
-            dialog.Close();
+            ApplyPalette(new UiCustomPalette(
+                preset.Accent,
+                preset.Colors["#080d12"],
+                preset.Colors["#111820"],
+                preset.Colors["#263244"],
+                preset.Colors["#f5f7ff"],
+                Motif: motif));
+            RefreshBackdropControls();
+            RenderPaletteGroup(showingGroup);
+            UiLabAppearance.PreviewCustomPalette(CurrentPalette());
             ApplyAppearanceBrushes();
             Dispatcher.UIThread.Post(RebuildShell);
+            savedPaletteStatus.Text = "Показаны цвета стиля; сохранённая тема не изменена";
         };
         cancel.Click += (_, _) => dialog.Close();
         dialog.Closing += (_, _) =>
@@ -2318,7 +2557,7 @@ public sealed class MainWindow : Window
             if (paletteCommitted) return;
             UiLabAppearance.PreviewCustomPalette(originalPalette);
             ApplyAppearanceBrushes();
-            if (screen == "map") RefreshMap();
+            Dispatcher.UIThread.Post(RebuildShell);
         };
 
         var fineGrid = new Grid { ColumnDefinitions = new ColumnDefinitions("*,*,*"), ColumnSpacing = 10 };
@@ -2385,7 +2624,7 @@ public sealed class MainWindow : Window
         };
         var paletteDescription = new TextBlock
         {
-            Text = "Настройте интерфейс и состояния компьютеров. Все изменения сразу видны в примере и на карте клуба.",
+            Text = "Настройте интерфейс, фон, прозрачность панелей и состояния компьютеров. Изменения сразу видны в приложении.",
             Foreground = Brush("#8f9aad"),
             TextWrapping = TextWrapping.Wrap
         };
@@ -2405,21 +2644,90 @@ public sealed class MainWindow : Window
         };
         var paletteRoot = new Grid
         {
-            RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*,Auto"),
+            RowDefinitions = new RowDefinitions("Auto,Auto,Auto,Auto,*,Auto"),
             RowSpacing = 12,
-            Children = { paletteHeading, paletteDescription, savedPaletteBar, paletteScroll, paletteFooter }
+            Children = { paletteHeading, paletteDescription, savedPaletteBar, backdropSettings, paletteScroll, paletteFooter }
         };
         Grid.SetRow(paletteDescription, 1);
         Grid.SetRow(savedPaletteBar, 2);
-        Grid.SetRow(paletteScroll, 3);
-        Grid.SetRow(paletteFooter, 4);
+        Grid.SetRow(backdropSettings, 3);
+        Grid.SetRow(paletteScroll, 4);
+        Grid.SetRow(paletteFooter, 5);
 
-        dialog.Content = new Border
+        var paletteContent = new Border
         {
             Padding = new Thickness(24),
             Background = Brush("#0d1217"),
             Child = paletteRoot
         };
+        Button PaletteWindowButton(string text) => new()
+        {
+            Content = text,
+            Background = Brushes.Transparent,
+            Foreground = Brush("#c9d3e6"),
+            BorderBrush = Brushes.Transparent,
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center
+        };
+        var minimizeWindow = PaletteWindowButton("—");
+        var maximizeWindow = PaletteWindowButton("□");
+        var closeWindow = PaletteWindowButton("×");
+        foreach (var button in new[] { minimizeWindow, maximizeWindow, closeWindow })
+        {
+            button.Width = 48;
+            button.Height = 48;
+            button.Padding = new Thickness(0);
+            button.BorderThickness = new Thickness(0);
+            button.CornerRadius = new CornerRadius(0);
+        }
+        closeWindow.Foreground = Brush("#ff6b78");
+        minimizeWindow.Click += (_, _) => dialog.WindowState = WindowState.Minimized;
+        maximizeWindow.Click += (_, _) => dialog.WindowState = dialog.WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+        closeWindow.Click += (_, _) => dialog.Close();
+        var windowControls = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Children = { minimizeWindow, maximizeWindow, closeWindow }
+        };
+        var windowTitle = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 10,
+            Margin = new Thickness(16, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Children =
+            {
+                AppMark(28),
+                new TextBlock
+                {
+                    Text = "Палитра интерфейса",
+                    Foreground = Brush("#f5f7ff"),
+                    FontWeight = FontWeight.SemiBold,
+                    VerticalAlignment = VerticalAlignment.Center
+                }
+            }
+        };
+        var titleBar = new Grid
+        {
+            Height = 48,
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            Background = Brush("#111820"),
+            Children = { windowTitle, windowControls }
+        };
+        Grid.SetColumn(windowControls, 1);
+        titleBar.PointerPressed += (_, e) =>
+        {
+            if (e.Source is Button || (e.Source as Control)?.FindAncestorOfType<Button>() != null) return;
+            if (e.GetCurrentPoint(titleBar).Properties.IsLeftButtonPressed) dialog.BeginMoveDrag(e);
+        };
+        var windowRoot = new Grid
+        {
+            RowDefinitions = new RowDefinitions("48,*"),
+            Children = { titleBar, paletteContent }
+        };
+        Grid.SetRow(paletteContent, 1);
+        dialog.Content = windowRoot;
         RenderPaletteGroup("interface");
         await dialog.ShowDialog(this);
     }
@@ -2517,7 +2825,26 @@ public sealed class MainWindow : Window
     private Border DragonHead(double width, double height, double opacity) =>
         DragonArtworkLayer(DragonHeadArtwork.Value, width, height, opacity);
 
-    private Grid BuildDragonBackdrop()
+    private static AvaloniaBitmap? LoadThemeBackground(string source)
+    {
+        if (string.IsNullOrWhiteSpace(source)) return null;
+        if (ThemeBackgroundArtworks.TryGetValue(source, out var cached)) return cached;
+        try
+        {
+            using var stream = source.StartsWith("avares://", StringComparison.OrdinalIgnoreCase)
+                ? AssetLoader.Open(new Uri(source))
+                : File.OpenRead(source);
+            cached = new AvaloniaBitmap(stream);
+        }
+        catch
+        {
+            cached = null;
+        }
+        ThemeBackgroundArtworks[source] = cached;
+        return cached;
+    }
+
+    private Grid BuildThemeBackdrop()
     {
         var layer = new Grid
         {
@@ -2525,18 +2852,19 @@ public sealed class MainWindow : Window
             IsHitTestVisible = false
         };
 
-        var sceneArtwork = DragonSceneArtwork.Value;
-        if (sceneArtwork is not null)
+        var artwork = LoadThemeBackground(UiLabAppearance.BackgroundImage);
+        if (artwork is not null)
         {
-            layer.Children.Add(new AvaloniaImage
+            themeBackdropImage = new AvaloniaImage
             {
-                Source = sceneArtwork,
+                Source = artwork,
                 Stretch = Stretch.Uniform,
-                Opacity = 0.25,
+                Opacity = UiLabAppearance.BackgroundOpacity,
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 VerticalAlignment = VerticalAlignment.Stretch,
                 IsHitTestVisible = false
-            });
+            };
+            layer.Children.Add(themeBackdropImage);
         }
 
         return layer;
@@ -3282,7 +3610,7 @@ public sealed class MainWindow : Window
         };
 
         var fullWidth = target == "dashboard" || target == "shop" || target == "ps" || target == "bookings" || target == "payments" || target == "clients" || target == "logs" || target == "cleaning-log" || target == "details";
-        sidePanel.IsVisible = !fullWidth;
+        SetInspectorVisibility(!fullWidth && selectedHostKeys.Any(records.ContainsKey));
         Grid.SetColumnSpan(contentHost, fullWidth ? 2 : 1);
         contentHost.Margin = ContentMargin(fullWidth);
         contentHost.Content = target switch
@@ -3325,7 +3653,7 @@ public sealed class MainWindow : Window
             mapScrollView = new ScrollViewer
             {
                 Content = mapCanvas,
-                Background = UiLabAppearance.HasDragonMotif ? Brushes.Transparent : Brush("#080d12"),
+                Background = UiLabAppearance.HasBackdrop ? Brushes.Transparent : Brush("#080d12"),
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto
             };
@@ -10135,15 +10463,32 @@ public sealed class MainWindow : Window
                 Child = remaining
             });
 
-            if (!string.IsNullOrWhiteSpace(record.ActiveTariffTitle))
+            if (!string.IsNullOrWhiteSpace(record.ActiveTariffTitle)
+                || record.SessionStartedAtUtc.HasValue
+                || record.SessionEndsAtUtc.HasValue)
             {
+                var sessionPeriod = record.SessionStartedAtUtc.HasValue && record.SessionEndsAtUtc.HasValue
+                    ? record.SessionStartedAtUtc.Value.ToLocalTime().ToString("HH:mm")
+                        + " → "
+                        + record.SessionEndsAtUtc.Value.ToLocalTime().ToString("HH:mm")
+                    : record.SessionStartedAtUtc.HasValue
+                        ? "с " + record.SessionStartedAtUtc.Value.ToLocalTime().ToString("HH:mm")
+                        : record.SessionEndsAtUtc.HasValue
+                            ? "до " + record.SessionEndsAtUtc.Value.ToLocalTime().ToString("HH:mm")
+                            : "активный пакет";
                 body.Children.Add(new StackPanel
                 {
                     Spacing = 2,
                     Children =
                     {
-                        new TextBlock { Text = "◷  " + record.ActiveTariffTitle, Foreground = Brush("#f5f7ff"), FontWeight = FontWeight.SemiBold, TextWrapping = TextWrapping.Wrap },
-                        new TextBlock { Text = record.SessionEndsAtUtc.HasValue ? "до " + record.SessionEndsAtUtc.Value.ToLocalTime().ToString("HH:mm") : "активный пакет", Foreground = Brush("#8f9aad"), FontSize = 12 }
+                        new TextBlock
+                        {
+                            Text = "◷  " + (string.IsNullOrWhiteSpace(record.ActiveTariffTitle) ? "Активный сеанс" : record.ActiveTariffTitle),
+                            Foreground = Brush("#f5f7ff"),
+                            FontWeight = FontWeight.SemiBold,
+                            TextWrapping = TextWrapping.Wrap
+                        },
+                        new TextBlock { Text = sessionPeriod, Foreground = Brush("#8f9aad"), FontSize = 12 }
                     }
                 });
             }
@@ -16113,6 +16458,7 @@ public sealed class MainWindow : Window
             .Where(x => selectedHostKeys.Contains(x.Name))
             .OrderBy(x => NaturalKey(x.Name))
             .ToList();
+        SetInspectorVisibility(screen == "map" && selectedHosts.Count > 0);
         selected = selectedHosts.FirstOrDefault();
         var bulk = selectedHosts.Count > 1;
         if (singleSelectionActions != null) singleSelectionActions.IsVisible = selectedHosts.Count == 1;
@@ -16154,6 +16500,13 @@ public sealed class MainWindow : Window
             "MAC: " + (string.IsNullOrWhiteSpace(selected.MacAddress) ? "-" : selected.MacAddress) + "\n" +
             "Shell: " + (string.IsNullOrWhiteSpace(selected.ShellVersion) ? "-" : selected.ShellVersion) + "\n" +
             "Сеансов: " + selected.ActiveSessionCount + " | Броней: " + selected.BookingCount;
+    }
+
+    private void SetInspectorVisibility(bool visible)
+    {
+        sidePanel.IsVisible = visible;
+        if (inspectorColumn != null)
+            inspectorColumn.Width = visible ? new GridLength(currentInspectorWidth) : new GridLength(0);
     }
 
     private bool NeedsCleaning(PcRecord record) =>
@@ -16601,16 +16954,17 @@ public sealed class MainWindow : Window
     private static IBrush StatusTint(string hex)
     {
         var color = Color.Parse(hex);
+        var alpha = (byte)Math.Round(255 * UiLabAppearance.PcCardOpacity);
         if (UiLabAppearance.HasDragonMotif)
         {
             var surface = Color.Parse(UiLabAppearance.Resolve("#111820"));
             return new SolidColorBrush(Color.FromArgb(
-                224,
+                alpha,
                 (byte)(surface.R * 0.78 + color.R * 0.22),
                 (byte)(surface.G * 0.78 + color.G * 0.22),
                 (byte)(surface.B * 0.78 + color.B * 0.22)));
         }
-        return new SolidColorBrush(Color.FromArgb(46, color.R, color.G, color.B));
+        return new SolidColorBrush(Color.FromArgb(alpha, color.R, color.G, color.B));
     }
 
     private static bool IsConnectionLost(PcRecord record)
@@ -16685,15 +17039,17 @@ public sealed class MainWindow : Window
         return Color.Parse(UiLabAppearance.Resolve(key));
     }
 
-    private static SolidColorBrush PanelBrush(string hex, byte alpha)
+    private static SolidColorBrush PanelBrush(string hex, byte _)
     {
-        if (!UiLabAppearance.HasDragonMotif) return Brush(hex);
         var color = Color.Parse(UiLabAppearance.Resolve(hex));
-        return new SolidColorBrush(Color.FromArgb(alpha, color.R, color.G, color.B));
+        var alpha = (byte)Math.Round(255 * UiLabAppearance.PanelOpacity);
+        var brush = new SolidColorBrush(Color.FromArgb(alpha, color.R, color.G, color.B));
+        ThemePanelBrushes.Add((hex, brush));
+        return brush;
     }
 
     private static IBrush PageBackground() =>
-        UiLabAppearance.HasDragonMotif ? Brushes.Transparent : Brush("#080d12");
+        UiLabAppearance.HasBackdrop ? Brushes.Transparent : Brush("#080d12");
 
     private static Dictionary<string, Point> BuildLayout()
     {

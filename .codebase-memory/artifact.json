@@ -1,11 +1,11 @@
 {
     "schema_version": 2,
     "commit": "",
-    "indexed_at": "2026-07-21T11:48:56Z",
+    "indexed_at": "2026-07-21T14:20:06Z",
     "project": "SmartShellCleanerAvalonia",
-    "nodes": 1711,
-    "edges": 5175,
-    "original_size": 6553600,
-    "compressed_size": 1023510,
+    "nodes": 1733,
+    "edges": 5221,
+    "original_size": 6619136,
+    "compressed_size": 1030611,
     "compression_level": 3
 }
